@@ -78,6 +78,9 @@ if __name__ == "__main__":
         simulate_numba(T)
     t_numba = time.perf_counter() - t0
 
-    print(f"plain Pint:       {t_pint    / repeats * 1e3:.2f} ms per call")
-    print(f"unit_jit:         {t_unitjit / repeats * 1e3:.2f} ms per call  ({t_pint / t_unitjit:.0f}x vs Pint)")
-    print(f"unit_jit + Numba: {t_numba   / repeats * 1e3:.2f} ms per call  ({t_pint / t_numba:.0f}x vs Pint)")
+    ms_pint    = t_pint    / repeats * 1e3
+    ms_unitjit = t_unitjit / repeats * 1e3
+    ms_numba   = t_numba   / repeats * 1e3
+    print(f"plain Pint:       {ms_pint   :6.2f} ms per call")
+    print(f"unit_jit:         {ms_unitjit:6.2f} ms per call  ({t_pint / t_unitjit:.0f}x vs Pint)")
+    print(f"unit_jit + Numba: {ms_numba  :6.2f} ms per call  ({t_pint / t_numba:.0f}x vs Pint)")

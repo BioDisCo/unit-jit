@@ -283,9 +283,9 @@ Two warm-up calls are needed: the first runs the original Pint function to infer
 On the same mRNA decay benchmark (Apple M3 Pro, 600 steps, 300 repetitions):
 
 ```
-plain Pint:       23.06 ms per call
-unit_jit:          0.08 ms per call    (298x vs Pint)
-unit_jit + Numba:  0.01 ms per call  (2306x vs Pint)
+plain Pint:        23.34 ms per call
+unit_jit:           0.08 ms per call  (277x vs Pint)
+unit_jit + Numba:   0.02 ms per call  (1485x vs Pint)
 ```
 
 The additional 5x on top of unit_jit comes from Numba compiling the inner loop to native code. The gain grows with loop complexity and body size. Numba is imported lazily and only required when `use_numba=True` is set.
