@@ -66,6 +66,39 @@ def simulate(n: int) -> Quantity:
     return out * ureg.mol / ureg.L  # trajectory with units
 ```
 
+### NumPy array with units
+
+```python
+import numpy as np
+from pint import Quantity
+from unit_jit import unit_jit, ureg
+
+@unit_jit
+def path_total(path: Quantity) -> Quantity:
+    return np.sum(path)
+
+path = np.array([1.0, 2.0, 3.0]) * ureg.m
+path_total(path)        # warm-up
+path_total(path)        # fast; returns 6.0 m as Quantity
+```
+
+### Vectorized operations on Quantity arrays
+
+```python
+import numpy as np
+from pint import Quantity
+from unit_jit import unit_jit, ureg
+
+@unit_jit
+def speeds(distances: Quantity, times: Quantity) -> Quantity:
+    return distances / times
+
+d = np.array([10.0, 20.0, 30.0]) * ureg.m
+t = np.array([2.0,  4.0,  5.0]) * ureg.s
+speeds(d, t)   # warm-up
+speeds(d, t)   # fast; returns [5., 5., 6.] m/s as Quantity
+```
+
 ### Class with Quantity attributes
 
 ```python

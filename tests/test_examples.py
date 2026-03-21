@@ -98,3 +98,67 @@ def test_model_rate_returns_quantity():
     model = Model(Params(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s))
     result = model.rate(5 * ureg.mol / ureg.L)
     assert isinstance(result, Quantity)
+
+
+# NumPy array with units
+
+
+@unit_jit
+def path_total(path: Quantity) -> Quantity:
+    """Sum of a path given as a Quantity-wrapped ndarray."""
+    return np.sum(path)
+
+
+def test_path_total_returns_quantity():
+    path = np.array([1.0, 2.0, 3.0]) * ureg.m
+    result = path_total(path)
+    assert isinstance(result, Quantity)
+
+
+def test_path_total_value():
+    path = np.array([1.0, 2.0, 3.0]) * ureg.m
+    path_total(path)  # warm-up
+    result = path_total(path)
+    assert abs(result.to_base_units().magnitude - 6.0) < 1e-12
+
+
+def test_path_total_non_si_units():
+    """Path in cm; result should be in SI (metres)."""
+    path = np.array([100.0, 200.0, 300.0]) * ureg.cm  # 1 m, 2 m, 3 m
+    path_total(path)  # warm-up
+    result = path_total(path)
+    assert abs(result.to_base_units().magnitude - 6.0) < 1e-12
+
+
+# Vectorized operations on Quantity arrays
+
+
+@unit_jit
+def speeds(distances: Quantity, times: Quantity) -> Quantity:
+    """Element-wise speed from distance and time arrays."""
+    return distances / times
+
+
+def test_speeds_returns_quantity():
+    d = np.array([10.0, 20.0, 30.0]) * ureg.m
+    t = np.array([2.0, 4.0, 5.0]) * ureg.s
+    result = speeds(d, t)
+    assert isinstance(result, Quantity)
+
+
+def test_speeds_values():
+    d = np.array([10.0, 20.0, 30.0]) * ureg.m
+    t = np.array([2.0, 4.0, 5.0]) * ureg.s
+    speeds(d, t)  # warm-up
+    result = speeds(d, t)
+    np.testing.assert_allclose(result.to_base_units().magnitude, [5.0, 5.0, 6.0])
+
+
+def test_speeds_non_si_units():
+    """Input in km and hours; result should match in SI (m/s)."""
+    d = np.array([10.0, 20.0, 30.0]) * ureg.km
+    t = np.array([2.0, 4.0, 5.0]) * ureg.hour
+    speeds(d, t)  # warm-up
+    result = speeds(d, t)
+    expected = np.array([10000.0 / 7200.0, 20000.0 / 14400.0, 30000.0 / 18000.0])
+    np.testing.assert_allclose(result.to_base_units().magnitude, expected, rtol=1e-12)

@@ -7,7 +7,8 @@ from pint import Quantity
 
 from unit_jit import unit_jit, ureg
 
-# ── Shared decorated functions ─────────────────────────────────────────────────
+
+# Shared decorated functions
 
 
 @unit_jit
@@ -25,7 +26,7 @@ def _l2_norm(v: Quantity) -> float:
 
 @unit_jit
 def _scale_plain(x: np.ndarray, factor: float) -> np.ndarray:
-    """Scale a plain ndarray by a plain float — no Pint involved."""
+    """Scale a plain ndarray by a plain float; no Pint involved."""
     return x * factor
 
 
@@ -35,7 +36,8 @@ def _weighted_sum(vals: Quantity, weights: np.ndarray) -> Quantity:
     return cast("Quantity", (vals * weights).sum())
 
 
-# ── Array Quantity in, array Quantity out ─────────────────────────────────────
+
+# Array Quantity in, array Quantity out
 
 
 def test_vec_div_returns_quantity():
@@ -70,7 +72,7 @@ def test_vec_div_non_si_units():
     np.testing.assert_allclose(result.to_base_units().magnitude, [1.5, 2.0], rtol=1e-12)
 
 
-# ── Array Quantity in, scalar out ─────────────────────────────────────────────
+# Array Quantity in, scalar out
 
 
 def test_l2_norm_returns_float():
@@ -95,7 +97,7 @@ def test_l2_norm_non_si_units():
     assert abs(result - 5.0) < 1e-12
 
 
-# ── Plain ndarray passthrough ─────────────────────────────────────────────────
+# Plain ndarray passthrough
 
 
 def test_plain_ndarray_passthrough_type():
@@ -112,7 +114,7 @@ def test_plain_ndarray_passthrough_values():
     np.testing.assert_array_equal(result, x * 3.0)
 
 
-# ── Mixed Quantity array + plain ndarray ─────────────────────────────────────
+# Mixed Quantity array + plain ndarray
 
 
 def test_weighted_sum_returns_quantity():
@@ -129,3 +131,5 @@ def test_weighted_sum_value():
     result = _weighted_sum(vals, w)
     expected = float(np.dot(vals.to_base_units().magnitude, w))
     assert abs(result.to_base_units().magnitude - expected) < 1e-12
+
+
