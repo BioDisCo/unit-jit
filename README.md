@@ -1,11 +1,11 @@
-# unit-fast
+# unit-jit
 
 JIT unit-stripping decorator for [Pint](https://pint.readthedocs.io)-annotated Python. Write clean, unit-safe code; pay no Pint overhead in hot loops.
 
 ```python
-from unit_fast import unit_fast, ureg
+from unit_jit import unit_jit, ureg
 
-@unit_fast
+@unit_jit
 def simulate(n: int) -> np.ndarray:
     mrna = 10.0 * ureg.mol / ureg.L
     dt   =  0.1 * ureg.s
@@ -21,9 +21,9 @@ First call runs the original Pint function (warm-up). All subsequent calls run a
 
 ## How it works
 
-1. **Module-level compilation** — on first call, all `@unit_fast` functions in the same module are rewritten together: `.magnitude`, `.to_base_units()`, and `cast("Quantity", x)` are stripped from the source.
+1. **Module-level compilation** — on first call, all `@unit_jit` functions in the same module are rewritten together: `.magnitude`, `.to_base_units()`, and `cast("Quantity", x)` are stripped from the source.
 2. **Eager snapshot** — Quantity attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is a plain dict lookup.
-3. **Fast zone** — a thread-local flag marks the outermost `@unit_fast` frame. Inner `@unit_fast` calls skip boundary conversion entirely.
+3. **Fast zone** — a thread-local flag marks the outermost `@unit_jit` frame. Inner `@unit_jit` calls skip boundary conversion entirely.
 4. **Return wrapping** — the SI unit of the return value is inferred from the first call and used to wrap subsequent results back into `Quantity`.
 5. **Dimension guard** — argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
 
@@ -33,17 +33,17 @@ The right entry point is the **outermost function that owns the hot loop** — n
 
 ```bash
 # uv (recommended)
-uv add unit-fast
+uv add unit-jit
 
 # pip
-pip install unit-fast
+pip install unit-jit
 ```
 
 From source:
 
 ```bash
 git clone ...
-cd unit-fast
+cd unit-jit
 
 # uv
 uv pip install -e ".[dev]"
@@ -57,9 +57,9 @@ pip install -e ".[dev]"
 ### Simple function
 
 ```python
-from unit_fast import unit_fast, ureg
+from unit_jit import unit_jit, ureg
 
-@unit_fast
+@unit_jit
 def velocity(d, t):
     return d / t
 
@@ -73,7 +73,7 @@ velocity(10 * ureg.m, 2 * ureg.m)   # TypeError — wrong dimension for arg 1
 
 ```python
 from dataclasses import dataclass
-from unit_fast import unit_fast, ureg
+from unit_jit import unit_jit, ureg
 
 @dataclass
 class Params:
@@ -84,11 +84,11 @@ class Model:
     def __init__(self, params):
         self.params = params
 
-    @unit_fast
+    @unit_jit
     def rate(self, mrna):
         return self.params.alpha - self.params.delta * mrna
 
-    @unit_fast                          # ← entry point: owns the hot loop
+    @unit_jit                          # ← entry point: owns the hot loop
     def simulate(self, n):
         mrna = self.params.alpha / self.params.delta
         out = np.empty(n)
@@ -108,4 +108,4 @@ pytest
 
 ## License
 
-MIT
+Apache-2.0
