@@ -3,18 +3,17 @@
 JIT unit-stripping decorator for [Pint](https://pint.readthedocs.io)-annotated Python. Write clean, unit-safe code; pay no Pint overhead in hot loops.
 
 ```python
+from pint import Quantity
 from unit_jit import unit_jit, ureg
 
 @unit_jit
-def simulate(n: int) -> np.ndarray:
-    mrna = 10.0 * ureg.mol / ureg.L
-    dt   =  0.1 * ureg.s
-    delta = 0.01 / ureg.s
-    out = np.empty(n)
-    for i in range(n):
-        mrna = mrna - delta * mrna * dt
-        out[i] = mrna.to_base_units().magnitude
-    return out
+def velocity(d: Quantity, t: Quantity) -> Quantity:
+    return d / t
+
+velocity(10 * ureg.m, 2 * ureg.s)   # warm-up (runs Pint)
+velocity(10 * ureg.m, 2 * ureg.s)   # fast (pure float internally)
+velocity(10 * ureg.cm, 2 * ureg.s)  # fine — same dimension, different unit
+velocity(10 * ureg.m, 2 * ureg.m)   # TypeError — wrong dimension for arg 1
 ```
 
 First call runs the original Pint function (warm-up). All subsequent calls run a rewritten, pure-float version.
@@ -62,6 +61,24 @@ velocity(10 * ureg.m, 2 * ureg.s)   # warm-up (runs Pint)
 velocity(10 * ureg.m, 2 * ureg.s)   # fast (pure float internally)
 velocity(10 * ureg.cm, 2 * ureg.s)  # fine — same dimension, different unit
 velocity(10 * ureg.m, 2 * ureg.m)   # TypeError — wrong dimension for arg 1
+```
+
+### Loop with unit arithmetic
+
+```python
+import numpy as np
+from unit_jit import unit_jit, ureg
+
+@unit_jit
+def simulate(n: int) -> np.ndarray:
+    mrna = 10.0 * ureg.mol / ureg.L
+    dt   =  0.1 * ureg.s
+    delta = 0.01 / ureg.s
+    out = np.empty(n)
+    for i in range(n):
+        mrna = mrna - delta * mrna * dt
+        out[i] = mrna.to_base_units().magnitude
+    return out
 ```
 
 ### Class with Quantity attributes
