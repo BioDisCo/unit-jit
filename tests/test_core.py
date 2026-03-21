@@ -9,7 +9,7 @@ from pint import Quantity
 
 from unit_jit import unit_jit, ureg
 
-# ── Shared decorated functions (all compiled together on first call) ────────────
+# Shared decorated functions (all compiled together on first call)
 
 
 @unit_jit
@@ -19,12 +19,12 @@ def _div(d: Quantity, t: Quantity) -> Quantity:
 
 @unit_jit
 def _strip_mag(x: Quantity) -> float:
-    return x.magnitude  # stripped → plain float in fast zone
+    return x.magnitude  # stripped to plain float in fast zone
 
 
 @unit_jit
 def _velocity_loop(n: int) -> Quantity:
-    """Return velocity as Quantity — unit_jit wraps the result back."""
+    """Return velocity as Quantity; unit_jit wraps the result back."""
     v = 0.0 * ureg.cm / ureg.s
     for _ in range(n):
         d = 10 * ureg.cm
@@ -50,7 +50,7 @@ class _Model:
 
     @unit_jit
     def simulate(self, n: int) -> np.ndarray:
-        """Decay loop — inner call to rate() stays in fast zone."""
+        """Decay loop; inner call to rate() stays in fast zone."""
         mrna: Quantity = self.params.alpha / self.params.delta
         out = np.empty(n)
         dt = 0.1 * ureg.s
@@ -60,7 +60,7 @@ class _Model:
         return out
 
 
-# ── Correctness ────────────────────────────────────────────────────────────────
+# Correctness
 
 
 def test_returns_quantity():
@@ -98,7 +98,7 @@ def test_quantity_return_wrapped():
     assert abs(result.to_base_units().magnitude - 0.05) < 1e-12  # 10 cm / 2 s = 0.05 m/s
 
 
-# ── Dimension check ────────────────────────────────────────────────────────────
+# Dimension check
 
 
 def test_dimension_mismatch_raises():
@@ -108,7 +108,7 @@ def test_dimension_mismatch_raises():
         _div(10 * ureg.m, 2 * ureg.m)  # arg2 is [length], expected [time]
 
 
-# ── Class with snapshot ────────────────────────────────────────────────────────
+# Class with snapshot
 
 
 def test_class_method_result():

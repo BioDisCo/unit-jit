@@ -12,21 +12,21 @@ def velocity(d: Quantity, t: Quantity) -> Quantity:
 
 velocity(10 * ureg.m, 2 * ureg.s)   # warm-up (runs Pint)
 velocity(10 * ureg.m, 2 * ureg.s)   # fast (pure float internally)
-velocity(10 * ureg.cm, 2 * ureg.s)  # fine — same dimension, different unit
-velocity(10 * ureg.m, 2 * ureg.m)   # TypeError — wrong dimension for arg 1
+velocity(10 * ureg.cm, 2 * ureg.s)  # fine: same dimension, different unit
+velocity(10 * ureg.m, 2 * ureg.m)   # TypeError: wrong dimension for arg 1
 ```
 
 First call runs the original Pint function (warm-up). All subsequent calls run a rewritten, pure-float version.
 
 ## How it works
 
-1. **Module-level compilation** — on first call, all `@unit_jit` functions in the same module are rewritten together: `.magnitude`, `.to_base_units()`, and `cast("Quantity", x)` are stripped from the source.
-2. **Eager snapshot** — Quantity attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is a plain dict lookup.
-3. **Fast zone** — a thread-local flag marks the outermost `@unit_jit` frame. Inner `@unit_jit` calls skip boundary conversion entirely.
-4. **Return wrapping** — the SI unit of the return value is inferred from the first call and used to wrap subsequent results back into `Quantity`.
-5. **Dimension guard** — argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
+1. **Module-level compilation**: on first call, all `@unit_jit` functions in the same module are rewritten together: `.magnitude`, `.to_base_units()`, and `cast("Quantity", x)` are stripped from the source.
+2. **Eager snapshot**: Quantity attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is a plain dict lookup.
+3. **Fast zone**: a thread-local flag marks the outermost `@unit_jit` frame. Inner `@unit_jit` calls skip boundary conversion entirely.
+4. **Return wrapping**: the SI unit of the return value is inferred from the first call and used to wrap subsequent results back into `Quantity`.
+5. **Dimension guard**: argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
 
-The right entry point is the **outermost function that owns the hot loop** — not the leaf functions it calls.
+The right entry point is the **outermost function that owns the hot loop**, not the leaf functions it calls.
 
 ## Installation
 
@@ -88,7 +88,7 @@ class Model:
     def rate(self, mrna: Quantity) -> Quantity:
         return self.params.alpha - self.params.delta * mrna
 
-    @unit_jit                          # ← entry point: owns the hot loop
+    @unit_jit  # entry point: owns the hot loop
     def simulate(self, n: int) -> np.ndarray:
         mrna = self.params.alpha / self.params.delta
         out = np.empty(n)

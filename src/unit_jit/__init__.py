@@ -9,10 +9,10 @@ The first call per entry point runs the original (Pint) function to infer
 return units; all subsequent calls use the rewritten float version.
 
 Rewrites applied inside the fast zone:
-  - x.magnitude          → x
-  - x.to_base_units()    → x
-  - cast("Quantity", x)  → x
-  - ureg.UNIT            → SI float (e.g. ureg.s → 1.0, ureg.cm → 0.01)
+  - x.magnitude         -> x
+  - x.to_base_units()   -> x
+  - cast("Quantity", x) -> x
+  - ureg.UNIT           -> SI float (e.g. ureg.s -> 1.0, ureg.cm -> 0.01)
   - arithmetic unchanged (works identically for floats)
 
 Quantity attributes on objects (e.g. self.params.alpha) are handled via an
@@ -36,18 +36,18 @@ _fast_zone = threading.local()
 _registry: dict[str, list[Callable[..., Any]]] = defaultdict(list)
 _compiled: dict[str, dict[str, Callable[..., Any]]] = {}
 _return_units: dict[str, Any] = {}
-_arg_dims: dict[str, tuple[list[Any], dict[str, Any]]] = {}  # qualname → (positional, keyword)
+_arg_dims: dict[str, tuple[list[Any], dict[str, Any]]] = {}  # qualname -> (positional, keyword)
 
 
 def _in_fast_zone() -> bool:
     return getattr(_fast_zone, "active", False)
 
 
-# ── CST transformer ────────────────────────────────────────────────────────────
+# CST transformer
 
 
 class _QuantityStripper(cst.CSTTransformer):
-    """Strip .magnitude, .to_base_units(), cast("Quantity", x), and ureg.UNIT → SI float."""
+    """Strip .magnitude, .to_base_units(), cast("Quantity", x), and ureg.UNIT -> SI float."""
 
     def __init__(self, ureg_vars: dict[str, UnitRegistry]) -> None:
         super().__init__()
@@ -58,7 +58,7 @@ class _QuantityStripper(cst.CSTTransformer):
     ) -> cst.BaseExpression:
         if updated_node.attr.value == "magnitude":
             return updated_node.value
-        # ureg.UNIT → SI float (e.g. ureg.s → 1.0, ureg.cm → 0.01)
+        # ureg.UNIT -> SI float (e.g. ureg.s -> 1.0, ureg.cm -> 0.01)
         if isinstance(updated_node.value, cst.Name):
             ureg_instance = self._ureg_vars.get(updated_node.value.value)
             if ureg_instance is not None:
@@ -74,7 +74,7 @@ class _QuantityStripper(cst.CSTTransformer):
         return updated_node
 
     def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.BaseExpression:
-        # x.to_base_units() → x
+        # x.to_base_units() -> x
         if (
             isinstance(updated_node.func, cst.Attribute)
             and updated_node.func.attr.value == "to_base_units"
@@ -82,7 +82,7 @@ class _QuantityStripper(cst.CSTTransformer):
         ):
             return updated_node.func.value
 
-        # cast("Quantity", x) → x
+        # cast("Quantity", x) -> x
         if (
             isinstance(updated_node.func, cst.Name)
             and updated_node.func.value == "cast"
@@ -95,7 +95,7 @@ class _QuantityStripper(cst.CSTTransformer):
         return updated_node
 
 
-# ── Boundary helpers ───────────────────────────────────────────────────────────
+# Boundary helpers
 
 _SNAP_KEY = "__unit_jit_snap__"
 
@@ -105,7 +105,7 @@ def _snapshot(obj: Any) -> Any:
 
     Returns an instance of the same class (so method lookup still works) but
     with a float-valued __dict__. Subsequent attribute access inside the fast
-    zone is a plain dict lookup — no Pint calls.
+    zone is a plain dict lookup, no Pint calls.
     """
     try:
         snap = object.__new__(type(obj))
@@ -128,7 +128,7 @@ def _snapshot(obj: Any) -> Any:
 
 
 def _to_fast(arg: Any) -> Any:
-    """Convert Quantity → SI float; snapshot complex objects; leave the rest."""
+    """Convert a Quantity to an SI float; snapshot complex objects; leave the rest unchanged."""
     if isinstance(arg, Quantity):
         return arg.to_base_units().magnitude
     if isinstance(arg, (int, float, bool, str, bytes, type(None))):
@@ -141,7 +141,7 @@ def _to_fast(arg: Any) -> Any:
 
 
 def _infer_units(result: Any) -> Any:
-    """Extract SI unit structure from a Pint result (for later wrapping)."""
+    """Extract SI unit structure from a Pint result for later wrapping."""
     if isinstance(result, Quantity):
         return result.to_base_units().units
     if isinstance(result, (list, tuple)):
@@ -151,7 +151,7 @@ def _infer_units(result: Any) -> Any:
 
 
 def _wrap(result: Any, unit_info: Any) -> Any:
-    """Wrap a float/array result back into Quantity using cached SI units."""
+    """Wrap a float/array result back into a Quantity using cached SI units."""
     if unit_info is None:
         return result
     if isinstance(unit_info, tuple):
@@ -160,10 +160,11 @@ def _wrap(result: Any, unit_info: Any) -> Any:
     return ureg.Quantity(result, unit_info)
 
 
-# ── Compilation ────────────────────────────────────────────────────────────────
+# Compilation
 
 
 def _strip_decorators(src: str) -> str:
+    """Remove leading decorator lines from a function's source before rewriting."""
     lines = src.splitlines()
     while lines and lines[0].lstrip().startswith("@"):
         lines.pop(0)
@@ -197,7 +198,7 @@ def _compile_module(module_name: str) -> None:
     _compiled[module_name] = fast
 
 
-# ── Decorator ──────────────────────────────────────────────────────────────────
+# Decorator
 
 
 def unit_jit[**P, R](func: Callable[P, R]) -> Callable[P, R]:
@@ -239,7 +240,7 @@ def unit_jit[**P, R](func: Callable[P, R]) -> Callable[P, R]:
             )
             return result
 
-        # Subsequent calls: check dimensions, convert → fast → wrap.
+        # Subsequent calls: check dimensions, convert, run fast version, wrap result.
         pos_dims, kw_dims = _arg_dims[qualname]
         for i, (arg, dim) in enumerate(zip(args, pos_dims)):
             if dim is not None and isinstance(arg, Quantity) and arg.dimensionality != dim:

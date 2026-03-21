@@ -8,7 +8,7 @@ from pint import Quantity
 
 from unit_jit import unit_jit, ureg
 
-# ── Simple function ─────────────────────────────────────────────────────────────
+# Simple function
 
 
 @unit_jit
@@ -35,7 +35,7 @@ def test_velocity_wrong_dimension_raises():
         velocity(10 * ureg.m, 2 * ureg.m)
 
 
-# ── Loop returning Quantity-wrapped ndarray ─────────────────────────────────────
+# Loop returning Quantity-wrapped ndarray
 
 
 @unit_jit
@@ -59,7 +59,7 @@ def test_simulate_returns_quantity_ndarray():
     assert np.all(np.isfinite(result.magnitude))
 
 
-# ── Class with Quantity attributes ──────────────────────────────────────────────
+# Class with Quantity attributes
 
 
 @dataclass
