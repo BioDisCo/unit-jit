@@ -11,9 +11,9 @@ from unit_jit import unit_jit, ureg  # noqa: E402
 
 @unit_jit(use_numba=True)
 def simulate_nb(t: Quantity) -> Quantity:
-    mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
-    dt    =  1.0 * ureg.s                     # 1 s timestep
-    delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
+    mrna = 10.0 * ureg.nmol / ureg.L  # 10 nM initial concentration
+    dt = 1.0 * ureg.s  # 1 s timestep
+    delta = np.log(2) / (5.0 * ureg.min)  # half-life 5 min (E. coli mRNA)
     n = int((t / dt).to_base_units().magnitude)
     out = np.empty(n)
     for i in range(n):
@@ -40,8 +40,8 @@ def test_numba_matches_plain_unitjit():
 
     @unit_jit
     def simulate_plain(t: Quantity) -> Quantity:
-        mrna  = 10.0 * ureg.nmol / ureg.L
-        dt    =  1.0 * ureg.s
+        mrna = 10.0 * ureg.nmol / ureg.L
+        dt = 1.0 * ureg.s
         delta = np.log(2) / (5.0 * ureg.min)
         n = int((t / dt).to_base_units().magnitude)
         out = np.empty(n)
@@ -53,5 +53,5 @@ def test_numba_matches_plain_unitjit():
     simulate_plain(5 * ureg.min)
     simulate_nb(5 * ureg.min)
     out_plain = simulate_plain(10 * ureg.min)
-    out_nb    = simulate_nb(10 * ureg.min)
+    out_nb = simulate_nb(10 * ureg.min)
     np.testing.assert_allclose(out_plain.magnitude, out_nb.magnitude)

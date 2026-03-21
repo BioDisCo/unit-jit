@@ -195,6 +195,7 @@ def _compile_module(module_name: str) -> None:
             rewritten = namespace[func.__name__]
             if func.__qualname__ in _use_numba:
                 import numba as _numba  # lazy: only when use_numba=True
+
                 rewritten = _numba.jit(nopython=True)(rewritten)
                 _log.debug("applied numba.jit to '%s'", func.__name__)
             fast[func.__qualname__] = rewritten
