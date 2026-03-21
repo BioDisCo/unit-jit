@@ -22,6 +22,17 @@ def _strip_mag(x: Quantity) -> float:
     return x.magnitude  # stripped → plain float in fast zone
 
 
+@unit_jit
+def _velocity_loop(n: int) -> Quantity:
+    """Return velocity as Quantity — unit_jit wraps the result back."""
+    v = 0.0 * ureg.cm / ureg.s
+    for _ in range(n):
+        d = 10 * ureg.cm
+        t = 2 * ureg.s
+        v = d / t
+    return v
+
+
 @dataclass
 class _Params:
     alpha: Quantity
@@ -77,6 +88,14 @@ def test_magnitude_stripped():
     _strip_mag(1 * ureg.m)  # warm-up
     result = _strip_mag(5 * ureg.m)
     assert isinstance(result, float | int)
+
+
+def test_quantity_return_wrapped():
+    """Returning a Quantity directly is wrapped back by unit_jit."""
+    _velocity_loop(1)  # warm-up
+    result = _velocity_loop(10)
+    assert isinstance(result, Quantity)
+    assert abs(result.to_base_units().magnitude - 0.05) < 1e-12  # 10 cm / 2 s = 0.05 m/s
 
 
 # ── Dimension check ────────────────────────────────────────────────────────────
