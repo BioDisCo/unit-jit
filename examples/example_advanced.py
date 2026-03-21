@@ -21,6 +21,7 @@ from typing import cast
 
 import numpy as np
 from pint import Quantity
+
 from unit_jit import unit_jit, ureg
 
 
