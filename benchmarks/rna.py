@@ -54,6 +54,5 @@ if __name__ == "__main__":
         simulate_pint(T)
     t_pint = time.perf_counter() - t0
 
-    print(f"unit_jit:   {t_fast / repeats * 1e3:.2f} ms per call")
     print(f"plain Pint: {t_pint / repeats * 1e3:.2f} ms per call")
-    print(f"speedup:    {t_pint / t_fast:.0f}x")
+    print(f"unit_jit:   {t_fast / repeats * 1e3:.2f} ms per call  ({t_pint / t_fast:.0f}x vs Pint)")
