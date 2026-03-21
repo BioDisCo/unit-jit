@@ -51,10 +51,11 @@ uv sync --extra dev  # or: pip install -e ".[dev]"
 ### Simple function
 
 ```python
+from pint import Quantity
 from unit_jit import unit_jit, ureg
 
 @unit_jit
-def velocity(d, t):
+def velocity(d: Quantity, t: Quantity) -> Quantity:
     return d / t
 
 velocity(10 * ureg.m, 2 * ureg.s)   # warm-up (runs Pint)
@@ -67,6 +68,9 @@ velocity(10 * ureg.m, 2 * ureg.m)   # TypeError — wrong dimension for arg 1
 
 ```python
 from dataclasses import dataclass
+
+import numpy as np
+from pint import Quantity
 from unit_jit import unit_jit, ureg
 
 @dataclass
@@ -75,15 +79,15 @@ class Params:
     delta: Quantity   # [1/s]
 
 class Model:
-    def __init__(self, params):
+    def __init__(self, params: Params) -> None:
         self.params = params
 
     @unit_jit
-    def rate(self, mrna):
+    def rate(self, mrna: Quantity) -> Quantity:
         return self.params.alpha - self.params.delta * mrna
 
     @unit_jit                          # ← entry point: owns the hot loop
-    def simulate(self, n):
+    def simulate(self, n: int) -> np.ndarray:
         mrna = self.params.alpha / self.params.delta
         out = np.empty(n)
         for i in range(n):
