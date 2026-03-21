@@ -16,7 +16,7 @@ velocity(10 * ureg.cm, 2 * ureg.s)  # fine: same dimension, different unit
 velocity(10 * ureg.m, 2 * ureg.m)   # TypeError: wrong dimension for arg 1
 ```
 
-First call runs the original Pint function (warm-up). All subsequent calls run a rewritten, pure-float version.
+The first call runs the original Pint function to infer return units and cache argument dimensions. All subsequent calls convert arguments to SI floats at the boundary, run a rewritten pure-float version of the function, and wrap the result back into a `Quantity` with the cached units.
 
 ## How it works
 
@@ -47,7 +47,9 @@ uv sync --extra dev  # or: pip install -e ".[dev]"
 
 ## Usage
 
-### Loop with unit arithmetic
+### Scalar loop
+
+The primary use case is a tight loop over scalars. `unit_jit` rewrites the function body so that all Pint calls disappear: `ureg.mol / ureg.L` becomes the corresponding SI float, `.to_base_units()` is stripped, and arithmetic runs on plain floats. The returned ndarray is wrapped back into a `Quantity` with the units inferred from the first call.
 
 ```python
 import numpy as np
@@ -63,10 +65,12 @@ def simulate(n: int) -> Quantity:
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out * ureg.mol / ureg.L  # trajectory with units
+    return out * ureg.mol / ureg.L
 ```
 
-### NumPy array with units
+### NumPy array argument
+
+When the argument is a `Quantity` wrapping a NumPy array, `unit_jit` converts it to the underlying SI ndarray at the boundary. The function body then runs on plain NumPy, and the result is wrapped back.
 
 ```python
 import numpy as np
@@ -78,11 +82,13 @@ def path_total(path: Quantity) -> Quantity:
     return np.sum(path)
 
 path = np.array([1.0, 2.0, 3.0]) * ureg.m
-path_total(path)        # warm-up
-path_total(path)        # fast; returns 6.0 m as Quantity
+path_total(path)   # warm-up
+path_total(path)   # fast; returns 6.0 m as Quantity
 ```
 
 ### Vectorized operations on Quantity arrays
+
+Multiple `Quantity` array arguments work the same way: each is converted to its SI ndarray independently, and the operation runs without any Pint overhead.
 
 ```python
 import numpy as np
@@ -101,6 +107,10 @@ speeds(d, t)   # fast; returns [5., 5., 6.] m/s as Quantity
 
 ### Class with Quantity attributes
 
+`unit_jit` can be applied to individual methods or to the whole class at once. When applied to a class, it decorates all non-dunder methods automatically.
+
+`unit_jit` snapshots all `Quantity` attributes on `self` once at the outermost boundary entry, replacing them with SI floats. Inner methods called from within the fast zone skip boundary conversion entirely, so there is no double-conversion overhead.
+
 ```python
 from dataclasses import dataclass
 
@@ -113,25 +123,63 @@ class Params:
     alpha: Quantity   # [mol/L/s]
     delta: Quantity   # [1/s]
 
+@unit_jit
 class Model:
     def __init__(self, params: Params) -> None:
         self.params = params
 
-    @unit_jit
     def rate(self, mrna: Quantity) -> Quantity:
         return self.params.alpha - self.params.delta * mrna
 
-    @unit_jit  # entry point: owns the hot loop
-    def simulate(self, n: int) -> np.ndarray:
+    def simulate(self, n: int) -> np.ndarray:  # entry point: owns the hot loop
         mrna = self.params.alpha / self.params.delta
         out = np.empty(n)
         for i in range(n):
-            mrna = mrna + self.rate(mrna) * (0.1 * ureg.s)   # rate() in fast zone
+            mrna = mrna + self.rate(mrna) * (0.1 * ureg.s)
             out[i] = mrna.to_base_units().magnitude
         return out
 ```
 
-`self.params.alpha` and all other Quantity attributes are converted to SI floats once when `simulate` is first called fast; `self.rate()` is called from inside the fast zone, so it skips boundary conversion entirely.
+`simulate` is the entry point: it owns the hot loop and is where boundary conversion happens. `rate` is called from within the fast zone, so it receives plain floats directly and its rewritten body runs without any Pint calls.
+
+## Debugging
+
+To inspect what code actually runs in the fast zone, use `get_rewritten_source`. It triggers compilation if needed and returns the rewritten function source as a string.
+
+```python
+from pint import Quantity
+from unit_jit import unit_jit, get_rewritten_source, ureg
+
+@unit_jit
+def simulate(n: int) -> Quantity:
+    mrna = 10.0 * ureg.mol / ureg.L
+    dt   =  0.1 * ureg.s
+    delta = 0.01 / ureg.s
+    out = np.empty(n)
+    for i in range(n):
+        mrna = mrna - delta * mrna * dt
+        out[i] = mrna.to_base_units().magnitude
+    return out * ureg.mol / ureg.L
+
+simulate(1)  # trigger compilation
+print(get_rewritten_source(simulate))
+```
+
+Output:
+
+```python
+def simulate(n: int) -> Quantity:
+    mrna = 10.0 * 1.0 / 0.0010000000000000002
+    dt   =  0.1 * 1.0
+    delta = 0.01 / 1.0
+    out = np.empty(n)
+    for i in range(n):
+        mrna = mrna - delta * mrna * dt
+        out[i] = mrna
+    return out * 1.0 / 0.0010000000000000002
+```
+
+All `ureg` unit references are replaced by their SI float values (`ureg.mol / ureg.L` becomes `1.0 / 0.001` since 1 mol/L = 1000 mol/m³), `.to_base_units().magnitude` is stripped, and the arithmetic is otherwise unchanged.
 
 ## Running tests
 

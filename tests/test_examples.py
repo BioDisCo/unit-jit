@@ -59,7 +59,7 @@ def test_simulate_returns_quantity_ndarray():
     assert np.all(np.isfinite(result.magnitude))
 
 
-# Class with Quantity attributes
+# Class with Quantity attributes, per-method decorator
 
 
 @dataclass
@@ -98,6 +98,59 @@ def test_model_rate_returns_quantity():
     model = Model(Params(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s))
     result = model.rate(5 * ureg.mol / ureg.L)
     assert isinstance(result, Quantity)
+
+
+# Class decorator
+
+
+@dataclass
+class Params2:
+    alpha: Quantity  # [mol/L/s]
+    delta: Quantity  # [1/s]
+
+
+@unit_jit
+class Model2:
+    def __init__(self, params: Params2) -> None:
+        self.params = params
+
+    def rate(self, mrna: Quantity) -> Quantity:
+        return self.params.alpha - self.params.delta * mrna
+
+    def simulate(self, n: int) -> np.ndarray:
+        mrna = self.params.alpha / self.params.delta
+        out = np.empty(n)
+        for i in range(n):
+            mrna = mrna + self.rate(mrna) * (0.1 * ureg.s)
+            out[i] = mrna.to_base_units().magnitude
+        return out
+
+
+def test_class_decorator_simulate_shape_and_finite():
+    model = Model2(Params2(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s))
+    model.simulate(5)  # warm-up
+    out = model.simulate(20)
+    assert out.shape == (20,)
+    assert np.all(np.isfinite(out))
+
+
+def test_class_decorator_rate_returns_quantity():
+    model = Model2(Params2(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s))
+    result = model.rate(5 * ureg.mol / ureg.L)
+    assert isinstance(result, Quantity)
+
+
+def test_class_decorator_matches_per_method_decorator():
+    """Class decorator and per-method decorator give identical results."""
+    params = Params(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s)
+    params2 = Params2(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s)
+    m1 = Model(params)
+    m2 = Model2(params2)
+    m1.simulate_model(5)
+    m2.simulate(5)
+    out1 = m1.simulate_model(20)
+    out2 = m2.simulate(20)
+    np.testing.assert_allclose(out1, out2)
 
 
 # NumPy array with units

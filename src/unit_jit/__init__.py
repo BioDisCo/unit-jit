@@ -25,7 +25,7 @@ import textwrap
 import threading
 from collections import defaultdict
 from collections.abc import Callable
-from typing import Any
+from typing import Any, overload
 
 import libcst as cst
 from pint import Quantity, UnitRegistry
@@ -35,6 +35,7 @@ ureg = UnitRegistry()
 _fast_zone = threading.local()
 _registry: dict[str, list[Callable[..., Any]]] = defaultdict(list)
 _compiled: dict[str, dict[str, Callable[..., Any]]] = {}
+_rewritten_src: dict[str, str] = {}  # qualname -> rewritten source
 _return_units: dict[str, Any] = {}
 _arg_dims: dict[str, tuple[list[Any], dict[str, Any]]] = {}  # qualname -> (positional, keyword)
 
@@ -188,7 +189,8 @@ def _compile_module(module_name: str) -> None:
             new_src = tree.visit(stripper).code
             namespace: dict[str, Any] = {}
             exec(new_src, module_globals, namespace)
-            fast[func.__name__] = namespace[func.__name__]
+            fast[func.__qualname__] = namespace[func.__name__]
+            _rewritten_src[func.__qualname__] = new_src
             tag = "rewrote" if new_src != src else "no changes"
             print(f"[unit_jit] {tag}: '{func.__name__}'")
         except Exception as exc:
@@ -198,18 +200,51 @@ def _compile_module(module_name: str) -> None:
     _compiled[module_name] = fast
 
 
+def get_rewritten_source(func: Callable[..., Any]) -> str:
+    """Return the rewritten (unit-stripped) source of a @unit_jit function.
+
+    Triggers compilation of the module if it has not happened yet.
+    Useful for debugging: inspect what code actually runs in the fast zone.
+    """
+    module_name = func.__module__
+    if module_name not in _compiled:
+        _compile_module(module_name)
+    src = _rewritten_src.get(func.__qualname__)
+    if src is None:
+        raise ValueError(f"no rewritten source found for '{func.__qualname__}'")
+    return src
+
+
 # Decorator
 
 
-def unit_jit[**P, R](func: Callable[P, R]) -> Callable[P, R]:
-    """JIT decorator: strips Pint overhead, runs fast after first call.
+@overload
+def unit_jit(func: type) -> type: ...
 
+
+@overload
+def unit_jit[**P, R](func: Callable[P, R]) -> Callable[P, R]: ...
+
+
+def unit_jit(func: Any) -> Any:
+    """JIT decorator for functions and classes: strips Pint overhead, runs fast after first call.
+
+    When applied to a function:
     - First call: runs original function (Pint), infers return units, caches them.
     - Subsequent calls: converts args to SI floats, runs rewritten version,
       wraps result back into Quantity with cached units.
     - If called from within the fast zone (inner call): skips boundary
       conversion, calls rewritten version directly.
+
+    When applied to a class: applies the function decorator to all non-dunder
+    methods defined directly on the class.
     """
+    if isinstance(func, type):
+        for name, method in func.__dict__.items():
+            if inspect.isfunction(method) and not name.startswith("__"):
+                setattr(func, name, unit_jit(method))
+        return func
+
     module_name = func.__module__
     _registry[module_name].append(func)
 
@@ -217,7 +252,7 @@ def unit_jit[**P, R](func: Callable[P, R]) -> Callable[P, R]:
         if module_name not in _compiled:
             _compile_module(module_name)
 
-        fast_func = _compiled[module_name].get(func.__name__, func)
+        fast_func: Callable[..., Any] = _compiled[module_name].get(func.__qualname__, func)  # type: ignore[assignment]
         qualname = func.__qualname__
 
         if _in_fast_zone():
