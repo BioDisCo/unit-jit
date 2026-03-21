@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "unit-jit"
-version = "0.2.0"
+version = "0.3.0"
 description = "JIT unit-stripping decorator: write Pint-annotated code, run at float speed"
 authors = [{ name = "Matthias Függer" }]
 readme = "README.md"
