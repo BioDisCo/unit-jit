@@ -42,7 +42,7 @@ pip install unit-jit
 From source:
 
 ```bash
-git clone ...
+git clone https://github.com/BioDisCo/unit-jit
 cd unit-jit
 
 # uv
