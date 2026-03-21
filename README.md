@@ -20,6 +20,8 @@ The first call runs the original Pint function to infer return units and cache a
 
 ## Benchmark
 
+Both functions below are identical in structure. `simulate_pint` runs with full Pint overhead on every call; `simulate_fast` pays that cost only on the first call and runs as plain floats thereafter.
+
 ```python
 import time
 
