@@ -31,37 +31,39 @@ from unit_jit import unit_jit, ureg
 
 
 @unit_jit
-def simulate_fast(n: int) -> np.ndarray:
+def simulate_fast(t: Quantity) -> Quantity:
     mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
     dt    =  1.0 * ureg.s                     # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
+    n = int((t / dt).to_base_units().magnitude)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out  # SI: mol/m^3
+    return out * ureg.mol / ureg.m**3
 
 
-def simulate_pint(n: int) -> np.ndarray:
+def simulate_pint(t: Quantity) -> Quantity:
     mrna  = 10.0 * ureg.nmol / ureg.L
     dt    =  1.0 * ureg.s
     delta = np.log(2) / (5.0 * ureg.min)
+    n = int((t / dt).to_base_units().magnitude)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out
+    return out * ureg.mol / ureg.m**3
 
 
-N, repeats = 500, 300
-simulate_fast(N)  # warm-up
+T, repeats = 10 * ureg.min, 300
+simulate_fast(T)  # warm-up
 
 t0 = time.perf_counter()
-for _ in range(repeats): simulate_fast(N)
+for _ in range(repeats): simulate_fast(T)
 t_fast = time.perf_counter() - t0
 
 t0 = time.perf_counter()
-for _ in range(repeats): simulate_pint(N)
+for _ in range(repeats): simulate_pint(T)
 t_pint = time.perf_counter() - t0
 
 print(f"unit_jit:   {t_fast / repeats * 1e3:.2f} ms per call")
@@ -69,12 +71,12 @@ print(f"plain Pint: {t_pint / repeats * 1e3:.2f} ms per call")
 print(f"speedup:    {t_pint / t_fast:.0f}x")
 ```
 
-Result on an Apple M3 Pro (500 steps, 300 repetitions):
+Result on an Apple M3 Pro (600 steps, 300 repetitions):
 
 ```
-unit_jit:   0.05 ms per call
-plain Pint: 14.03 ms per call
-speedup:    278x
+unit_jit:   0.10 ms per call
+plain Pint: 26.69 ms per call
+speedup:    270x
 ```
 
 The speedup scales with loop length: the longer the loop, the more Pint overhead is avoided per call.
@@ -110,7 +112,7 @@ uv sync --extra dev  # or: pip install -e ".[dev]"
 
 ### Scalar loop
 
-The primary use case is a tight loop over scalars. `unit_jit` rewrites the function body so that all Pint calls disappear: `ureg.mol / ureg.L` becomes the corresponding SI float, `.to_base_units()` is stripped, and arithmetic runs on plain floats. The returned ndarray is wrapped back into a `Quantity` with the units inferred from the first call.
+The primary use case is a tight loop over scalars. `unit_jit` rewrites the function body so that all Pint calls disappear: `ureg.nmol / ureg.L` becomes the corresponding SI float, `.to_base_units()` is stripped, and arithmetic runs on plain floats. The result is wrapped back into a `Quantity` with the units inferred from the first call.
 
 ```python
 import numpy as np
@@ -118,15 +120,16 @@ from pint import Quantity
 from unit_jit import unit_jit, ureg
 
 @unit_jit
-def simulate(n: int) -> np.ndarray:
+def simulate(t: Quantity) -> Quantity:
     mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
     dt    =  1.0 * ureg.s                     # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
+    n = int((t / dt).to_base_units().magnitude)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out  # SI: mol/m^3
+    return out * ureg.mol / ureg.m**3
 ```
 
 ### NumPy array argument
@@ -192,13 +195,15 @@ class Model:
     def rate(self, mrna: Quantity) -> Quantity:
         return self.params.alpha - self.params.delta * mrna
 
-    def simulate(self, n: int) -> np.ndarray:  # entry point: owns the hot loop
+    def simulate(self, t: Quantity) -> Quantity:  # entry point: owns the hot loop
+        dt   = 10.0 * ureg.s
         mrna = self.params.alpha / self.params.delta
-        out = np.empty(n)
+        n    = int((t / dt).to_base_units().magnitude)
+        out  = np.empty(n)
         for i in range(n):
-            mrna = mrna + self.rate(mrna) * (0.1 * ureg.s)
+            mrna = mrna + self.rate(mrna) * dt
             out[i] = mrna.to_base_units().magnitude
-        return out
+        return out * ureg.mol / ureg.m**3
 ```
 
 `simulate` is the entry point: it owns the hot loop and is where boundary conversion happens. `rate` is called from within the fast zone, so it receives plain floats directly and its rewritten body runs without any Pint calls.
@@ -208,39 +213,42 @@ class Model:
 To inspect what code actually runs in the fast zone, use `get_rewritten_source`. It triggers compilation if needed and returns the rewritten function source as a string.
 
 ```python
+import numpy as np
 from pint import Quantity
 from unit_jit import unit_jit, get_rewritten_source, ureg
 
 @unit_jit
-def simulate(n: int) -> np.ndarray:
+def simulate(t: Quantity) -> Quantity:
     mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
     dt    =  1.0 * ureg.s                     # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
+    n = int((t / dt).to_base_units().magnitude)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out  # SI: mol/m^3
+    return out * ureg.mol / ureg.m**3
 
-simulate(1)  # trigger compilation
+simulate(10 * ureg.min)  # trigger compilation
 print(get_rewritten_source(simulate))
 ```
 
 Output:
 
 ```python
-def simulate(n: int) -> np.ndarray:
+def simulate(t: Quantity) -> Quantity:
     mrna  = 10.0 * 1e-09 / 0.0010000000000000002
     dt    =  1.0 * 1.0
     delta = np.log(2) / (5.0 * 60.0)
+    n = int((t / dt))
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna
-    return out
+    return out * 1.0 / 1.0 ** 3
 ```
 
-All `ureg` unit references are replaced by their SI float values (`ureg.nmol / ureg.L` becomes `1e-9 / 0.001` since 1 nmol/L = 1e-6 mol/m³, and `ureg.min` becomes `60.0` seconds), `.to_base_units().magnitude` is stripped, and the arithmetic is otherwise unchanged.
+All `ureg` unit references are replaced by their SI float values (`ureg.nmol / ureg.L` becomes `1e-9 / 0.001`, `ureg.min` becomes `60.0`, `ureg.mol / ureg.m**3` becomes `1.0 / 1.0**3`), `.to_base_units().magnitude` is stripped, and the arithmetic is otherwise unchanged.
 
 ## Running tests
 

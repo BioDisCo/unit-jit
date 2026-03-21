@@ -39,23 +39,24 @@ def test_velocity_wrong_dimension_raises():
 
 
 @unit_jit
-def simulate(n: int) -> np.ndarray:
+def simulate(t: Quantity) -> Quantity:
     mrna = 10.0 * ureg.nmol / ureg.L  # 10 nM initial concentration
     dt = 1.0 * ureg.s  # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)  # half-life 5 min (E. coli mRNA)
+    n = int((t / dt).to_base_units().magnitude)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out  # SI: mol/m^3
+    return out * ureg.mol / ureg.m**3
 
 
-def test_simulate_returns_ndarray():
-    simulate(5)  # warm-up
-    result = simulate(10)
-    assert isinstance(result, np.ndarray)
-    assert result.shape == (10,)
-    assert np.all(np.isfinite(result))
+def test_simulate_returns_quantity():
+    simulate(5 * ureg.min)  # warm-up
+    result = simulate(10 * ureg.min)
+    assert isinstance(result, Quantity)
+    assert result.magnitude.shape == (600,)
+    assert np.all(np.isfinite(result.magnitude))
 
 
 # Class with Quantity attributes, per-method decorator
@@ -76,21 +77,23 @@ class Model:
         return self.params.alpha - self.params.delta * mrna
 
     @unit_jit
-    def simulate_model(self, n: int) -> np.ndarray:
+    def simulate_model(self, t: Quantity) -> Quantity:
+        dt = 10.0 * ureg.s
         mrna = self.params.alpha / self.params.delta
+        n = int((t / dt).to_base_units().magnitude)
         out = np.empty(n)
         for i in range(n):
-            mrna = mrna + self.rate(mrna) * (0.1 * ureg.s)
+            mrna = mrna + self.rate(mrna) * dt
             out[i] = mrna.to_base_units().magnitude
-        return out
+        return out * ureg.mol / ureg.m**3
 
 
 def test_model_simulate_shape_and_finite():
     model = Model(Params(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s))
-    model.simulate_model(5)  # warm-up
-    out = model.simulate_model(20)
-    assert out.shape == (20,)
-    assert np.all(np.isfinite(out))
+    model.simulate_model(5 * ureg.min)  # warm-up
+    out = model.simulate_model(10 * ureg.min)
+    assert out.magnitude.shape == (60,)
+    assert np.all(np.isfinite(out.magnitude))
 
 
 def test_model_rate_returns_quantity():
@@ -116,21 +119,23 @@ class Model2:
     def rate(self, mrna: Quantity) -> Quantity:
         return self.params.alpha - self.params.delta * mrna
 
-    def simulate(self, n: int) -> np.ndarray:
+    def simulate(self, t: Quantity) -> Quantity:
+        dt = 10.0 * ureg.s
         mrna = self.params.alpha / self.params.delta
+        n = int((t / dt).to_base_units().magnitude)
         out = np.empty(n)
         for i in range(n):
-            mrna = mrna + self.rate(mrna) * (0.1 * ureg.s)
+            mrna = mrna + self.rate(mrna) * dt
             out[i] = mrna.to_base_units().magnitude
-        return out
+        return out * ureg.mol / ureg.m**3
 
 
 def test_class_decorator_simulate_shape_and_finite():
     model = Model2(Params2(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s))
-    model.simulate(5)  # warm-up
-    out = model.simulate(20)
-    assert out.shape == (20,)
-    assert np.all(np.isfinite(out))
+    model.simulate(5 * ureg.min)  # warm-up
+    out = model.simulate(10 * ureg.min)
+    assert out.magnitude.shape == (60,)
+    assert np.all(np.isfinite(out.magnitude))
 
 
 def test_class_decorator_rate_returns_quantity():
@@ -145,11 +150,11 @@ def test_class_decorator_matches_per_method_decorator():
     params2 = Params2(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s)
     m1 = Model(params)
     m2 = Model2(params2)
-    m1.simulate_model(5)
-    m2.simulate(5)
-    out1 = m1.simulate_model(20)
-    out2 = m2.simulate(20)
-    np.testing.assert_allclose(out1, out2)
+    m1.simulate_model(5 * ureg.min)
+    m2.simulate(5 * ureg.min)
+    out1 = m1.simulate_model(10 * ureg.min)
+    out2 = m2.simulate(10 * ureg.min)
+    np.testing.assert_allclose(out1.magnitude, out2.magnitude)
 
 
 # NumPy array with units

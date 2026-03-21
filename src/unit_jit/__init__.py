@@ -21,6 +21,7 @@ boundary entry, so attribute access inside the loop is a plain dict lookup.
 """
 
 import inspect
+import logging
 import textwrap
 import threading
 from collections import defaultdict
@@ -31,6 +32,7 @@ import libcst as cst
 from pint import Quantity, UnitRegistry
 
 ureg = UnitRegistry()
+_log = logging.getLogger(__name__)
 
 _fast_zone = threading.local()
 _registry: dict[str, list[Callable[..., Any]]] = defaultdict(list)
@@ -191,10 +193,10 @@ def _compile_module(module_name: str) -> None:
             exec(new_src, module_globals, namespace)
             fast[func.__qualname__] = namespace[func.__name__]
             _rewritten_src[func.__qualname__] = new_src
-            tag = "rewrote" if new_src != src else "no changes"
-            print(f"[unit_jit] {tag}: '{func.__name__}'")
-        except Exception as exc:
-            print(f"[unit_jit] could not rewrite '{func.__name__}': {exc}")
+            if new_src != src:
+                _log.debug("rewrote '%s'", func.__name__)
+        except (OSError, cst.ParserSyntaxError, SyntaxError) as exc:
+            _log.debug("could not rewrite '%s': %s", func.__name__, exc)
             fast[func.__name__] = func
 
     _compiled[module_name] = fast
