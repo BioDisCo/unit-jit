@@ -273,19 +273,22 @@ def simulate(t: Quantity) -> Quantity:
         out[i] = mrna.to_base_units().magnitude
     return out * ureg.mol / ureg.m**3
 
-simulate(10 * ureg.min)  # warm-up: unit_jit rewrite + Numba compilation
-simulate(10 * ureg.min)  # fast: Numba-compiled float loop
+simulate(10 * ureg.min)  # 1st call: runs Pint, infers return units
+simulate(10 * ureg.min)  # 2nd call: triggers Numba compilation
+simulate(10 * ureg.min)  # 3rd call onwards: Numba-compiled float loop
 ```
+
+Two warm-up calls are needed: the first runs the original Pint function to infer return units (the same as plain `unit_jit`), and the second triggers Numba's own JIT compilation. From the third call on, the full pipeline runs at native speed.
 
 On the same mRNA decay benchmark (Apple M3 Pro, 600 steps, 300 repetitions):
 
 ```
-plain Pint:       23.17 ms per call
-unit_jit:          0.08 ms per call  (300x vs Pint)
-unit_jit + Numba:  0.04 ms per call  (2x vs unit_jit)
+plain Pint:       23.06 ms per call
+unit_jit:          0.08 ms per call    (298x vs Pint)
+unit_jit + Numba:  0.01 ms per call  (2306x vs Pint)
 ```
 
-The additional 2x on top of unit_jit comes from Numba compiling the inner loop to native code. The gain grows with loop complexity and body size. Numba is imported lazily and only required when `use_numba=True` is set.
+The additional 5x on top of unit_jit comes from Numba compiling the inner loop to native code. The gain grows with loop complexity and body size. Numba is imported lazily and only required when `use_numba=True` is set.
 
 `use_numba=True` is not suitable for functions that call other `@unit_jit`-decorated methods internally (e.g. `simulate_model` calling `self.rate`), as Numba cannot compile through the Python wrapper.
 

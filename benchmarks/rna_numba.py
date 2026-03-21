@@ -9,7 +9,6 @@ speedup. Run with:
 
 import time
 
-import numba
 import numpy as np
 from pint import Quantity
 
@@ -29,23 +28,17 @@ def simulate_unitjit(t: Quantity) -> Quantity:
     return out * ureg.mol / ureg.m**3
 
 
-# Equivalent inner loop: what unit_jit produces internally, compiled with Numba.
-@numba.jit(nopython=True)
-def _simulate_nb(t_s: float) -> np.ndarray:
-    mrna  = 10.0 * 1e-9 / 1e-3               # SI: mol/m^3
-    dt    = 1.0                               # SI: s
-    delta = np.log(2) / (5.0 * 60.0)         # SI: 1/s
-    n = int(t_s / dt)
+@unit_jit(use_numba=True)
+def simulate_numba(t: Quantity) -> Quantity:
+    mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
+    dt    =  1.0 * ureg.s                     # 1 s timestep
+    delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
+    n = int((t / dt).to_base_units().magnitude)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
-        out[i] = mrna
-    return out
-
-
-def simulate_numba(t: Quantity) -> Quantity:
-    raw = _simulate_nb(t.to_base_units().magnitude)
-    return raw * ureg.mol / ureg.m**3
+        out[i] = mrna.to_base_units().magnitude
+    return out * ureg.mol / ureg.m**3
 
 
 def simulate_pint(t: Quantity) -> Quantity:
@@ -63,8 +56,11 @@ def simulate_pint(t: Quantity) -> Quantity:
 if __name__ == "__main__":
     T, repeats = 10 * ureg.min, 300
 
-    simulate_unitjit(T)   # warm-up: unit_jit compilation
-    simulate_numba(T)     # warm-up: Numba compilation
+    simulate_unitjit(T)   # warm-up: unit_jit compilation (Pint first call)
+    simulate_unitjit(T)   # warm-up: unit_jit fast path
+    simulate_numba(T)     # warm-up: Pint first call
+    simulate_numba(T)     # warm-up: triggers Numba compilation
+    simulate_numba(T)     # warm-up: Numba fast path
     simulate_pint(T)      # warm-up
 
     t0 = time.perf_counter()
@@ -84,4 +80,4 @@ if __name__ == "__main__":
 
     print(f"plain Pint:       {t_pint    / repeats * 1e3:.2f} ms per call")
     print(f"unit_jit:         {t_unitjit / repeats * 1e3:.2f} ms per call  ({t_pint / t_unitjit:.0f}x vs Pint)")
-    print(f"unit_jit + Numba: {t_numba   / repeats * 1e3:.2f} ms per call  ({t_unitjit / t_numba:.0f}x vs unit_jit)")
+    print(f"unit_jit + Numba: {t_numba   / repeats * 1e3:.2f} ms per call  ({t_pint / t_numba:.0f}x vs Pint)")
