@@ -254,7 +254,7 @@ Function `get_rewritten_source` shows only what runs inside the fast zone. The b
 
 ## Numba integration
 
-For functions with a pure float/NumPy inner loop, `use_numba=True` additionally compiles the rewritten function with Numba, giving a further speedup on top of the Pint stripping.
+For functions with a pure float/NumPy inner loop, `use_numba=True` additionally compiles the rewritten function with [Numba](https://numba.readthedocs.io), giving a further speedup on top of the Pint stripping.
 
 ```python
 import numpy as np
