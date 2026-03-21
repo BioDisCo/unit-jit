@@ -40,6 +40,7 @@ _compiled: dict[str, dict[str, Callable[..., Any]]] = {}
 _rewritten_src: dict[str, str] = {}  # qualname -> rewritten source
 _return_units: dict[str, Any] = {}
 _arg_dims: dict[str, tuple[list[Any], dict[str, Any]]] = {}  # qualname -> (positional, keyword)
+_use_numba: set[str] = set()  # qualnames for which numba.jit should be applied
 
 
 def _in_fast_zone() -> bool:
@@ -191,7 +192,12 @@ def _compile_module(module_name: str) -> None:
             new_src = tree.visit(stripper).code
             namespace: dict[str, Any] = {}
             exec(new_src, module_globals, namespace)
-            fast[func.__qualname__] = namespace[func.__name__]
+            rewritten = namespace[func.__name__]
+            if func.__qualname__ in _use_numba:
+                import numba as _numba  # lazy: only when use_numba=True
+                rewritten = _numba.jit(nopython=True)(rewritten)
+                _log.debug("applied numba.jit to '%s'", func.__name__)
+            fast[func.__qualname__] = rewritten
             _rewritten_src[func.__qualname__] = new_src
             if new_src != src:
                 _log.debug("rewrote '%s'", func.__name__)
@@ -221,14 +227,18 @@ def get_rewritten_source(func: Callable[..., Any]) -> str:
 
 
 @overload
-def unit_jit(func: type) -> type: ...
+def unit_jit(func: type, *, use_numba: bool = ...) -> type: ...
 
 
 @overload
-def unit_jit[**P, R](func: Callable[P, R]) -> Callable[P, R]: ...
+def unit_jit[**P, R](func: Callable[P, R], *, use_numba: bool = ...) -> Callable[P, R]: ...
 
 
-def unit_jit(func: Any) -> Any:
+@overload
+def unit_jit(func: None = ..., *, use_numba: bool = ...) -> Callable[[Any], Any]: ...
+
+
+def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
     """JIT decorator for functions and classes: strips Pint overhead, runs fast after first call.
 
     When applied to a function:
@@ -240,12 +250,24 @@ def unit_jit(func: Any) -> Any:
 
     When applied to a class: applies the function decorator to all non-dunder
     methods defined directly on the class.
+
+    Args:
+        use_numba: if True, apply numba.jit(nopython=True) to the rewritten
+            float function. Requires numba to be installed. Best suited for
+            functions whose rewritten body is pure float/NumPy with no calls
+            to other @unit_jit-decorated functions.
     """
+    if func is None:
+        return lambda f: unit_jit(f, use_numba=use_numba)
+
     if isinstance(func, type):
         for name, method in func.__dict__.items():
             if inspect.isfunction(method) and not name.startswith("__"):
-                setattr(func, name, unit_jit(method))
+                setattr(func, name, unit_jit(method, use_numba=use_numba))
         return func
+
+    if use_numba:
+        _use_numba.add(func.__qualname__)
 
     module_name = func.__module__
     _registry[module_name].append(func)
