@@ -1,4 +1,11 @@
-"""Benchmark: unit_jit vs plain Pint for a scalar mRNA decay loop."""
+"""Benchmark: unit_jit vs plain Pint for a scalar mRNA decay loop.
+
+Both functions are identical in structure. simulate_pint runs with full Pint
+overhead on every call; simulate_fast pays that cost only on the first call
+and runs as plain floats thereafter. Run with:
+
+    python benchmarks/rna.py
+"""
 
 import time
 
