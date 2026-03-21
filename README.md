@@ -32,24 +32,18 @@ The right entry point is the **outermost function that owns the hot loop** — n
 ## Installation
 
 ```bash
-# uv (recommended)
 uv add unit-jit
+```
 
-# pip
+```bash
 pip install unit-jit
 ```
 
 From source:
 
 ```bash
-git clone https://github.com/BioDisCo/unit-jit
-cd unit-jit
-
-# uv
-uv sync --extra dev
-
-# pip
-pip install -e ".[dev]"
+git clone https://github.com/BioDisCo/unit-jit && cd unit-jit
+uv sync --extra dev  # or: pip install -e ".[dev]"
 ```
 
 ## Usage
