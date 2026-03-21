@@ -33,7 +33,7 @@ from unit_jit import unit_jit, ureg
 @unit_jit
 def simulate_fast(t: Quantity) -> Quantity:
     mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
-    dt    =  1.0 * ureg.s                     # 1 s timestep
+    dt    =  1.0 * ureg.s                    # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
     n = int((t / dt).to_base_units().magnitude)
     out = np.empty(n)
