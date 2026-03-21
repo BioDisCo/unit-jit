@@ -12,7 +12,7 @@ def velocity(d: Quantity, t: Quantity) -> Quantity:
 
 velocity(10 * ureg.m, 2 * ureg.s)   # warm-up (runs Pint)
 velocity(10 * ureg.m, 2 * ureg.s)   # fast (pure float internally)
-velocity(10 * ureg.cm, 2 * ureg.s)  # fine: same dimension, different unit
+velocity(10 * ureg.cm, 2 * ureg.s)  # fast and fine: same dimension, different unit
 velocity(10 * ureg.m, 2 * ureg.m)   # TypeError: wrong dimension for arg 1
 ```
 
