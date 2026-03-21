@@ -1,9 +1,9 @@
 import time
 
-from unit_fast import unit_fast, ureg
+from unit_jit import unit_jit, ureg
 
 
-@unit_fast
+@unit_jit
 def simulate(n: int) -> float:
     v = 0.0 * ureg.cm / ureg.s
     for _ in range(n):
@@ -38,6 +38,6 @@ for _ in range(repeats):
     simulate_pint(N)
 t_pint = time.perf_counter() - t0
 
-print(f"unit_fast:  {t_fast:.3f} s")
+print(f"unit_jit:   {t_fast:.3f} s")
 print(f"plain Pint: {t_pint:.3f} s")
 print(f"speedup:    {t_pint / t_fast:.1f}x")

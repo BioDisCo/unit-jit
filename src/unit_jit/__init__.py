@@ -54,7 +54,7 @@ class _QuantityStripper(cst.CSTTransformer):
         self._ureg_vars = ureg_vars
 
     def leave_Attribute(
-        self, _original_node: cst.Attribute, updated_node: cst.Attribute
+        self, original_node: cst.Attribute, updated_node: cst.Attribute
     ) -> cst.BaseExpression:
         if updated_node.attr.value == "magnitude":
             return updated_node.value
@@ -73,7 +73,7 @@ class _QuantityStripper(cst.CSTTransformer):
                     pass
         return updated_node
 
-    def leave_Call(self, _original_node: cst.Call, updated_node: cst.Call) -> cst.BaseExpression:
+    def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.BaseExpression:
         # x.to_base_units() → x
         if (
             isinstance(updated_node.func, cst.Attribute)

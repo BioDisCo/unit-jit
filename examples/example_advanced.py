@@ -1,8 +1,8 @@
-"""Advanced example: mRNA model with @unit_fast.
+"""Advanced example: mRNA model with @unit_jit.
 
 Mirrors the structure of real biological models:
   - Params dataclass with Pint Quantity fields
-  - Module-level helper called from a class method (inner @unit_fast call,
+  - Module-level helper called from a class method (inner @unit_jit call,
     no double boundary conversion)
   - Class method with self.params.* Quantity attribute access via proxy
 
@@ -21,7 +21,7 @@ from typing import cast
 
 import numpy as np
 from pint import Quantity
-from unit_fast import unit_fast, ureg
+from unit_jit import unit_jit, ureg
 
 
 @dataclass
@@ -38,7 +38,7 @@ class Params:
 # is True so boundary conversion is skipped — args are already SI floats.
 
 
-@unit_fast
+@unit_jit
 def _ou_noise(
     rng: np.random.Generator,
     sigma: Quantity,
@@ -55,17 +55,17 @@ class Model:
     def __init__(self, params: Params) -> None:
         self.params = params
 
-    @unit_fast
+    @unit_jit
     def drift(self, mrna: Quantity) -> Quantity:
         """Deterministic drift: (alpha - delta * mRNA) * dt  [mol/L]."""
         return cast("Quantity", (self.params.alpha - self.params.delta * mrna) * self.params.dt)
 
-    @unit_fast
+    @unit_jit
     def noise(self, rng: np.random.Generator, mrna: Quantity) -> Quantity:
         """Stochastic term via helper. mrna unused but kept for interface symmetry."""
         return _ou_noise(rng, self.params.sigma, self.params.dt)  # type: ignore[return-value]
 
-    @unit_fast
+    @unit_jit
     def simulate(self, n_steps: int, seed: int = 0) -> np.ndarray:
         """Euler-Maruyama trajectory. Returns mRNA concentrations [mol/L]."""
         rng = np.random.default_rng(seed)

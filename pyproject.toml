@@ -37,5 +37,6 @@ testpaths = ["tests"]
 [tool.pyright]
 pythonVersion = "3.12"
 venvPath = "."
-venv = "venv"
+venv = ".venv"
 extraPaths = ["src"]
+exclude = ["tests", "examples", ".venv"]
