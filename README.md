@@ -59,16 +59,15 @@ T, repeats = 10 * ureg.min, 300
 simulate_fast(T)  # warm-up
 
 t0 = time.perf_counter()
-for _ in range(repeats): simulate_fast(T)
-t_fast = time.perf_counter() - t0
-
-t0 = time.perf_counter()
 for _ in range(repeats): simulate_pint(T)
 t_pint = time.perf_counter() - t0
 
-print(f"unit_jit:   {t_fast / repeats * 1e3:.2f} ms per call")
+t0 = time.perf_counter()
+for _ in range(repeats): simulate_fast(T)
+t_fast = time.perf_counter() - t0
+
 print(f"plain Pint: {t_pint / repeats * 1e3:.2f} ms per call")
-print(f"speedup:    {t_pint / t_fast:.0f}x")
+print(f"unit_jit:   {t_fast / repeats * 1e3:.2f} ms per call  ({t_pint / t_fast:.0f}x vs Pint)")
 ```
 
 Result on an Apple M3 Pro (600 steps, 300 repetitions):
