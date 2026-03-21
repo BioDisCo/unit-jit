@@ -74,9 +74,9 @@ print(f"speedup:    {t_pint / t_fast:.0f}x")
 Result on an Apple M3 Pro (600 steps, 300 repetitions):
 
 ```
-unit_jit:   0.10 ms per call
-plain Pint: 26.69 ms per call
-speedup:    270x
+unit_jit:   0.09 ms per call
+plain Pint: 26.92 ms per call
+speedup:    290x
 ```
 
 The speedup scales with loop length: the longer the loop, the more Pint overhead is avoided per call.
