@@ -46,7 +46,7 @@ git clone ...
 cd unit-jit
 
 # uv
-uv pip install -e ".[dev]"
+uv sync --extra dev
 
 # pip
 pip install -e ".[dev]"
