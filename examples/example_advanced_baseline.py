@@ -16,10 +16,10 @@ ureg = UnitRegistry()
 
 @dataclass
 class Params:
-    alpha: Quantity   # transcription rate  [mol/L/s]
-    delta: Quantity   # degradation rate    [1/s]
-    sigma: Quantity   # noise amplitude     [mol/L/s^(1/2)]
-    dt: Quantity      # timestep            [s]
+    alpha: Quantity  # transcription rate  [mol/L/s]
+    delta: Quantity  # degradation rate    [1/s]
+    sigma: Quantity  # noise amplitude     [mol/L/s^(1/2)]
+    dt: Quantity  # timestep            [s]
 
 
 def _ou_noise(

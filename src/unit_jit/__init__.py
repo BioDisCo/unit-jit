@@ -25,10 +25,10 @@ import textwrap
 import threading
 from collections import defaultdict
 from collections.abc import Callable
-from typing import Any, ParamSpec, TypeVar
+from typing import Any
 
-from pint import Quantity, UnitRegistry
 import libcst as cst
+from pint import Quantity, UnitRegistry
 
 ureg = UnitRegistry()
 
@@ -37,9 +37,6 @@ _registry: dict[str, list[Callable[..., Any]]] = defaultdict(list)
 _compiled: dict[str, dict[str, Callable[..., Any]]] = {}
 _return_units: dict[str, Any] = {}
 _arg_dims: dict[str, tuple[list[Any], dict[str, Any]]] = {}  # qualname → (positional, keyword)
-
-P = ParamSpec("P")
-R = TypeVar("R")
 
 
 def _in_fast_zone() -> bool:
@@ -66,15 +63,17 @@ class _QuantityStripper(cst.CSTTransformer):
             ureg_instance = self._ureg_vars.get(updated_node.value.value)
             if ureg_instance is not None:
                 try:
-                    si_val = (1 * getattr(ureg_instance, updated_node.attr.value)).to_base_units().magnitude
+                    si_val = (
+                        (1 * getattr(ureg_instance, updated_node.attr.value))
+                        .to_base_units()
+                        .magnitude
+                    )
                     return cst.Float(repr(float(si_val)))
                 except Exception:
                     pass
         return updated_node
 
-    def leave_Call(
-        self, _original_node: cst.Call, updated_node: cst.Call
-    ) -> cst.BaseExpression:
+    def leave_Call(self, _original_node: cst.Call, updated_node: cst.Call) -> cst.BaseExpression:
         # x.to_base_units() → x
         if (
             isinstance(updated_node.func, cst.Attribute)
@@ -114,7 +113,11 @@ def _snapshot(obj: Any) -> Any:
         for name, val in getattr(obj, "__dict__", {}).items():
             if isinstance(val, Quantity):
                 snap_dict[name] = val.to_base_units().magnitude
-            elif hasattr(val, "__dict__") and not callable(val) and not hasattr(val, "__array_interface__"):
+            elif (
+                hasattr(val, "__dict__")
+                and not callable(val)
+                and not hasattr(val, "__array_interface__")
+            ):
                 snap_dict[name] = _snapshot(val)
             else:
                 snap_dict[name] = val
@@ -197,7 +200,7 @@ def _compile_module(module_name: str) -> None:
 # ── Decorator ──────────────────────────────────────────────────────────────────
 
 
-def unit_jit(func: Callable[P, R]) -> Callable[P, R]:
+def unit_jit[**P, R](func: Callable[P, R]) -> Callable[P, R]:
     """JIT decorator: strips Pint overhead, runs fast after first call.
 
     - First call: runs original function (Pint), infers return units, caches them.
@@ -229,7 +232,10 @@ def unit_jit(func: Callable[P, R]) -> Callable[P, R]:
             _return_units[qualname] = _infer_units(result)
             _arg_dims[qualname] = (
                 [a.dimensionality if isinstance(a, Quantity) else None for a in args],
-                {k: v.dimensionality if isinstance(v, Quantity) else None for k, v in kwargs.items()},
+                {
+                    k: v.dimensionality if isinstance(v, Quantity) else None
+                    for k, v in kwargs.items()
+                },
             )
             return result
 

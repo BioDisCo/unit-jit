@@ -9,7 +9,6 @@ from pint import Quantity
 
 from unit_jit import unit_jit, ureg
 
-
 # ── Shared decorated functions (all compiled together on first call) ────────────
 
 

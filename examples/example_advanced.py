@@ -21,22 +21,22 @@ from typing import cast
 
 import numpy as np
 from pint import Quantity
-
 from unit_fast import unit_fast, ureg
 
 
 @dataclass
 class Params:
-    alpha: Quantity   # transcription rate  [mol/L/s]
-    delta: Quantity   # degradation rate    [1/s]
-    sigma: Quantity   # noise amplitude     [mol/L/s^(1/2)]
-    dt: Quantity      # timestep            [s]
+    alpha: Quantity  # transcription rate  [mol/L/s]
+    delta: Quantity  # degradation rate    [1/s]
+    sigma: Quantity  # noise amplitude     [mol/L/s^(1/2)]
+    dt: Quantity  # timestep            [s]
 
 
 # ── Module-level helper ────────────────────────────────────────────────────────
 # Compiled together with Model.drift and Model.noise on first call.
 # When invoked from Model.noise (already inside the fast zone), _in_fast_zone()
 # is True so boundary conversion is skipped — args are already SI floats.
+
 
 @unit_fast
 def _ou_noise(
