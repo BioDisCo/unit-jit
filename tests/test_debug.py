@@ -7,15 +7,15 @@ from unit_jit import get_rewritten_source, unit_jit, ureg
 
 
 @unit_jit
-def _decay(n: int) -> Quantity:
-    mrna = 10.0 * ureg.mol / ureg.L
-    dt = 0.1 * ureg.s
-    delta = 0.01 / ureg.s
+def _decay(n: int) -> np.ndarray:
+    mrna = 10.0 * ureg.nmol / ureg.L  # 10 nM initial concentration
+    dt = 1.0 * ureg.s  # 1 s timestep
+    delta = np.log(2) / (5.0 * ureg.min)  # half-life 5 min (E. coli mRNA)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out * ureg.mol / ureg.L
+    return out  # SI: mol/m^3
 
 
 @unit_jit

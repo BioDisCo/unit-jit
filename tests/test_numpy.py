@@ -7,7 +7,6 @@ from pint import Quantity
 
 from unit_jit import unit_jit, ureg
 
-
 # Shared decorated functions
 
 
@@ -34,7 +33,6 @@ def _scale_plain(x: np.ndarray, factor: float) -> np.ndarray:
 def _weighted_sum(vals: Quantity, weights: np.ndarray) -> Quantity:
     """Dot product of a Quantity array with a plain weight vector."""
     return cast("Quantity", (vals * weights).sum())
-
 
 
 # Array Quantity in, array Quantity out
@@ -131,5 +129,3 @@ def test_weighted_sum_value():
     result = _weighted_sum(vals, w)
     expected = float(np.dot(vals.to_base_units().magnitude, w))
     assert abs(result.to_base_units().magnitude - expected) < 1e-12
-
-

@@ -10,32 +10,31 @@ and runs as plain floats thereafter. Run with:
 import time
 
 import numpy as np
-from pint import Quantity
 
 from unit_jit import unit_jit, ureg
 
 
 @unit_jit
-def simulate_fast(n: int) -> Quantity:
-    mrna = 10.0 * ureg.mol / ureg.L
-    dt   =  0.1 * ureg.s
-    delta = 0.01 / ureg.s
+def simulate_fast(n: int) -> np.ndarray:
+    mrna = 10.0 * ureg.nmol / ureg.L  # 10 nM initial concentration
+    dt = 1.0 * ureg.s  # 1 s timestep
+    delta = np.log(2) / (5.0 * ureg.min)  # half-life 5 min (E. coli mRNA)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out * ureg.mol / ureg.L
+    return out  # SI: mol/m^3
 
 
-def simulate_pint(n: int) -> Quantity:
-    mrna = 10.0 * ureg.mol / ureg.L
-    dt   =  0.1 * ureg.s
-    delta = 0.01 / ureg.s
+def simulate_pint(n: int) -> np.ndarray:
+    mrna = 10.0 * ureg.nmol / ureg.L
+    dt = 1.0 * ureg.s
+    delta = np.log(2) / (5.0 * ureg.min)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out * ureg.mol / ureg.L
+    return out
 
 
 if __name__ == "__main__":

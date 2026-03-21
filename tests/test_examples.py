@@ -39,24 +39,23 @@ def test_velocity_wrong_dimension_raises():
 
 
 @unit_jit
-def simulate(n: int) -> Quantity:
-    mrna = 10.0 * ureg.mol / ureg.L
-    dt = 0.1 * ureg.s
-    delta = 0.01 / ureg.s
+def simulate(n: int) -> np.ndarray:
+    mrna = 10.0 * ureg.nmol / ureg.L  # 10 nM initial concentration
+    dt = 1.0 * ureg.s  # 1 s timestep
+    delta = np.log(2) / (5.0 * ureg.min)  # half-life 5 min (E. coli mRNA)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out * ureg.mol / ureg.L
+    return out  # SI: mol/m^3
 
 
-def test_simulate_returns_quantity_ndarray():
+def test_simulate_returns_ndarray():
     simulate(5)  # warm-up
     result = simulate(10)
-    assert isinstance(result, Quantity)
-    assert isinstance(result.magnitude, np.ndarray)
-    assert result.magnitude.shape == (10,)
-    assert np.all(np.isfinite(result.magnitude))
+    assert isinstance(result, np.ndarray)
+    assert result.shape == (10,)
+    assert np.all(np.isfinite(result))
 
 
 # Class with Quantity attributes, per-method decorator

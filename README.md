@@ -31,26 +31,26 @@ from unit_jit import unit_jit, ureg
 
 
 @unit_jit
-def simulate_fast(n: int) -> Quantity:
-    mrna = 10.0 * ureg.mol / ureg.L
-    dt   =  0.1 * ureg.s
-    delta = 0.01 / ureg.s
+def simulate_fast(n: int) -> np.ndarray:
+    mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
+    dt    =  1.0 * ureg.s                     # 1 s timestep
+    delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out * ureg.mol / ureg.L
+    return out  # SI: mol/m^3
 
 
-def simulate_pint(n: int) -> Quantity:
-    mrna = 10.0 * ureg.mol / ureg.L
-    dt   =  0.1 * ureg.s
-    delta = 0.01 / ureg.s
+def simulate_pint(n: int) -> np.ndarray:
+    mrna  = 10.0 * ureg.nmol / ureg.L
+    dt    =  1.0 * ureg.s
+    delta = np.log(2) / (5.0 * ureg.min)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out * ureg.mol / ureg.L
+    return out
 
 
 N, repeats = 500, 300
@@ -72,9 +72,9 @@ print(f"speedup:    {t_pint / t_fast:.0f}x")
 Result on an Apple M3 Pro (500 steps, 300 repetitions):
 
 ```
-unit_jit:   0.03 ms per call
-plain Pint: 11.29 ms per call
-speedup:    327x
+unit_jit:   0.05 ms per call
+plain Pint: 14.03 ms per call
+speedup:    278x
 ```
 
 The speedup scales with loop length: the longer the loop, the more Pint overhead is avoided per call.
@@ -118,15 +118,15 @@ from pint import Quantity
 from unit_jit import unit_jit, ureg
 
 @unit_jit
-def simulate(n: int) -> Quantity:
-    mrna = 10.0 * ureg.mol / ureg.L
-    dt   =  0.1 * ureg.s
-    delta = 0.01 / ureg.s
+def simulate(n: int) -> np.ndarray:
+    mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
+    dt    =  1.0 * ureg.s                     # 1 s timestep
+    delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out * ureg.mol / ureg.L
+    return out  # SI: mol/m^3
 ```
 
 ### NumPy array argument
@@ -212,15 +212,15 @@ from pint import Quantity
 from unit_jit import unit_jit, get_rewritten_source, ureg
 
 @unit_jit
-def simulate(n: int) -> Quantity:
-    mrna = 10.0 * ureg.mol / ureg.L
-    dt   =  0.1 * ureg.s
-    delta = 0.01 / ureg.s
+def simulate(n: int) -> np.ndarray:
+    mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
+    dt    =  1.0 * ureg.s                     # 1 s timestep
+    delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna.to_base_units().magnitude
-    return out * ureg.mol / ureg.L
+    return out  # SI: mol/m^3
 
 simulate(1)  # trigger compilation
 print(get_rewritten_source(simulate))
@@ -229,18 +229,18 @@ print(get_rewritten_source(simulate))
 Output:
 
 ```python
-def simulate(n: int) -> Quantity:
-    mrna = 10.0 * 1.0 / 0.0010000000000000002
-    dt   =  0.1 * 1.0
-    delta = 0.01 / 1.0
+def simulate(n: int) -> np.ndarray:
+    mrna  = 10.0 * 1e-09 / 0.0010000000000000002
+    dt    =  1.0 * 1.0
+    delta = np.log(2) / (5.0 * 60.0)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
         out[i] = mrna
-    return out * 1.0 / 0.0010000000000000002
+    return out
 ```
 
-All `ureg` unit references are replaced by their SI float values (`ureg.mol / ureg.L` becomes `1.0 / 0.001` since 1 mol/L = 1000 mol/m³), `.to_base_units().magnitude` is stripped, and the arithmetic is otherwise unchanged.
+All `ureg` unit references are replaced by their SI float values (`ureg.nmol / ureg.L` becomes `1e-9 / 0.001` since 1 nmol/L = 1e-6 mol/m³, and `ureg.min` becomes `60.0` seconds), `.to_base_units().magnitude` is stripped, and the arithmetic is otherwise unchanged.
 
 ## Running tests
 
