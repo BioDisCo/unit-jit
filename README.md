@@ -18,6 +18,65 @@ velocity(10 * ureg.m, 2 * ureg.m)   # TypeError: wrong dimension for arg 1
 
 The first call runs the original Pint function to infer return units and cache argument dimensions. All subsequent calls convert arguments to SI floats at the boundary, run a rewritten pure-float version of the function, and wrap the result back into a `Quantity` with the cached units.
 
+## Benchmark
+
+```python
+import time
+
+import numpy as np
+from pint import Quantity
+from unit_jit import unit_jit, ureg
+
+
+@unit_jit
+def simulate_fast(n: int) -> Quantity:
+    mrna = 10.0 * ureg.mol / ureg.L
+    dt   =  0.1 * ureg.s
+    delta = 0.01 / ureg.s
+    out = np.empty(n)
+    for i in range(n):
+        mrna = mrna - delta * mrna * dt
+        out[i] = mrna.to_base_units().magnitude
+    return out * ureg.mol / ureg.L
+
+
+def simulate_pint(n: int) -> Quantity:
+    mrna = 10.0 * ureg.mol / ureg.L
+    dt   =  0.1 * ureg.s
+    delta = 0.01 / ureg.s
+    out = np.empty(n)
+    for i in range(n):
+        mrna = mrna - delta * mrna * dt
+        out[i] = mrna.to_base_units().magnitude
+    return out * ureg.mol / ureg.L
+
+
+N, repeats = 500, 300
+simulate_fast(N)  # warm-up
+
+t0 = time.perf_counter()
+for _ in range(repeats): simulate_fast(N)
+t_fast = time.perf_counter() - t0
+
+t0 = time.perf_counter()
+for _ in range(repeats): simulate_pint(N)
+t_pint = time.perf_counter() - t0
+
+print(f"unit_jit:   {t_fast / repeats * 1e3:.2f} ms per call")
+print(f"plain Pint: {t_pint / repeats * 1e3:.2f} ms per call")
+print(f"speedup:    {t_pint / t_fast:.0f}x")
+```
+
+Result on an Apple M3 Pro (500 steps, 300 repetitions):
+
+```
+unit_jit:   0.03 ms per call
+plain Pint: 11.29 ms per call
+speedup:    327x
+```
+
+The speedup scales with loop length: the longer the loop, the more Pint overhead is avoided per call.
+
 ## How it works
 
 1. **Module-level compilation**: on first call, all `@unit_jit` functions in the same module are rewritten together: `.magnitude`, `.to_base_units()`, and `cast("Quantity", x)` are stripped from the source.

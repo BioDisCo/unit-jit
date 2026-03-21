@@ -39,4 +39,4 @@ pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"
 extraPaths = ["src"]
-exclude = ["tests", "examples", ".venv"]
+exclude = ["tests", "examples", "benchmarks", ".venv"]
