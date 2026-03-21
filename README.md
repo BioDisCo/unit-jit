@@ -250,6 +250,8 @@ def simulate(t: Quantity) -> Quantity:
 
 All `ureg` unit references are replaced by their SI float values (`ureg.nmol / ureg.L` becomes `1e-9 / 0.001`, `ureg.min` becomes `60.0`, `ureg.mol / ureg.m**3` becomes `1.0 / 1.0**3`), `.to_base_units().magnitude` is stripped, and the arithmetic is otherwise unchanged.
 
+Function `get_rewritten_source` shows only what runs inside the fast zone. The boundary is not shown: arguments arrive as plain SI floats (so `t` is a float in seconds, not a `Quantity`), and the raw return value is wrapped back into a `Quantity` by the runtime using the units inferred from the first call. The annotations in the rewritten source are kept as-is but no longer reflect the actual types in flight.
+
 ## Running tests
 
 ```bash
