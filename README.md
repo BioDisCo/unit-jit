@@ -1,6 +1,6 @@
 # unit-jit
 
-JIT unit-stripping decorator for [Pint](https://pint.readthedocs.io)-annotated Python. Write clean, unit-safe code; pay no Pint overhead in hot loops.
+We love explicit tracking of physical units in code, but do not want to pay the runtime overhead in hot loops. `unit-jit` solves this with a single decorator: write your functions against [Pint](https://pint.readthedocs.io) as usual, and let `unit-jit` strip the unit machinery at JIT compile time so subsequent calls run on plain floats.
 
 ```python
 from pint import Quantity
@@ -247,6 +247,10 @@ All `ureg` unit references are replaced by their SI float values (`ureg.mol / ur
 ```bash
 pytest
 ```
+
+## Feedback
+
+If you find this library useful, feel free to drop a message. Hearing about your experience would be very welcome. If you have any suggestions or run into an issue, don't hesitate to [open an issue](https://github.com/BioDisCo/unit-jit/issues).
 
 ## License
 
