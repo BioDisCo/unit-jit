@@ -17,7 +17,7 @@ def simulate(n: int) -> np.ndarray:
     return out
 ```
 
-First call runs the original Pint function (warm-up). All subsequent calls run a rewritten, pure-float version — **~10× faster** for tight loops.
+First call runs the original Pint function (warm-up). All subsequent calls run a rewritten, pure-float version.
 
 ## How it works
 
