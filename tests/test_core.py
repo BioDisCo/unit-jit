@@ -158,3 +158,44 @@ def test_simulate_matches_pint_baseline():
     fast_out = model.simulate(20)
     pint_out = _simulate_pint(20)
     np.testing.assert_allclose(fast_out, pint_out, rtol=1e-10)
+
+
+# Custom registry
+
+
+def test_custom_registry_result_uses_same_registry():
+    """Results wrapped by unit_jit must belong to the user's registry, not unit_jit's internal one."""
+    from pint import UnitRegistry
+
+    my_ureg = UnitRegistry()
+
+    @unit_jit
+    def _scale(x: my_ureg.Quantity, factor: float) -> my_ureg.Quantity:  # type: ignore[name-defined]
+        return cast("Quantity", x * factor)
+
+    x = 3.0 * my_ureg.meter
+    _scale(x, 2.0)  # warm-up
+    result = _scale(x, 2.0)
+
+    assert isinstance(result, Quantity)
+    assert result._REGISTRY is my_ureg  # noqa: SLF001
+    assert abs(result.to_base_units().magnitude - 6.0) < 1e-12
+
+
+def test_custom_registry_interop_with_other_quantities():
+    """Returned Quantity from unit_jit can be combined with other Quantities from the same registry."""
+    from pint import UnitRegistry
+
+    my_ureg = UnitRegistry()
+
+    @unit_jit
+    def _double(x: my_ureg.Quantity) -> my_ureg.Quantity:  # type: ignore[name-defined]
+        return cast("Quantity", x * 2.0)
+
+    x = 1.0 * my_ureg.second
+    _double(x)  # warm-up
+    result = _double(x)
+
+    # This would raise "Cannot operate with Quantity of different registries" before the fix.
+    combined = result + 1.0 * my_ureg.second
+    assert abs(combined.to_base_units().magnitude - 3.0) < 1e-12

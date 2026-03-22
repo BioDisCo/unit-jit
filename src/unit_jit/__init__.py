@@ -41,6 +41,7 @@ _rewritten_src: dict[str, str] = {}  # qualname -> rewritten source
 _return_units: dict[str, Any] = {}
 _arg_dims: dict[str, tuple[list[Any], dict[str, Any]]] = {}  # qualname -> (positional, keyword)
 _use_numba: set[str] = set()  # qualnames for which numba.jit should be applied
+_return_registry: dict[str, UnitRegistry] = {}  # qualname -> registry used to wrap results
 
 
 def _in_fast_zone() -> bool:
@@ -144,24 +145,25 @@ def _to_fast(arg: Any) -> Any:
     return _snapshot(arg)
 
 
-def _infer_units(result: Any) -> Any:
-    """Extract SI unit structure from a Pint result for later wrapping."""
+def _infer_units(result: Any) -> tuple[Any, UnitRegistry | None]:
+    """Extract SI unit structure and the source registry from a Pint result."""
     if isinstance(result, Quantity):
-        return result.to_base_units().units
+        return result.to_base_units().units, result._REGISTRY  # noqa: SLF001
     if isinstance(result, (list, tuple)):
         units = [r.to_base_units().units if isinstance(r, Quantity) else None for r in result]
-        return (type(result), units)
-    return None
+        reg = next((r._REGISTRY for r in result if isinstance(r, Quantity)), None)  # noqa: SLF001
+        return (type(result), units), reg
+    return None, None
 
 
-def _wrap(result: Any, unit_info: Any) -> Any:
+def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry) -> Any:
     """Wrap a float/array result back into a Quantity using cached SI units."""
     if unit_info is None:
         return result
     if isinstance(unit_info, tuple):
         cls, units = unit_info
-        return cls(ureg.Quantity(r, u) if u is not None else r for r, u in zip(result, units))
-    return ureg.Quantity(result, unit_info)
+        return cls(wrap_ureg.Quantity(r, u) if u is not None else r for r, u in zip(result, units))
+    return wrap_ureg.Quantity(result, unit_info)
 
 
 # Compilation
@@ -290,7 +292,9 @@ def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
         # Entry point. First call: run original to infer return units + cache arg dimensions.
         if qualname not in _return_units:
             result = func(*args, **kwargs)
-            _return_units[qualname] = _infer_units(result)
+            unit_info, reg = _infer_units(result)
+            _return_units[qualname] = unit_info
+            _return_registry[qualname] = reg if reg is not None else ureg
             _arg_dims[qualname] = (
                 [a.dimensionality if isinstance(a, Quantity) else None for a in args],
                 {
@@ -322,7 +326,7 @@ def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
             raw = fast_func(*fast_args, **fast_kwargs)
         finally:
             _fast_zone.active = False
-        return _wrap(raw, _return_units[qualname])
+        return _wrap(raw, _return_units[qualname], _return_registry[qualname])
 
     wrapper.__name__ = func.__name__
     wrapper.__qualname__ = func.__qualname__

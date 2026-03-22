@@ -84,7 +84,7 @@ The speedup scales with loop length: the longer the loop, the more Pint overhead
 1. **Module-level compilation**: on first call, all `@unit_jit` functions in the same module are rewritten together: `.magnitude`, `.to_base_units()`, and `cast("Quantity", x)` are stripped from the source.
 2. **Eager snapshot**: Quantity attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is a plain dict lookup.
 3. **Fast zone**: a thread-local flag marks the outermost `@unit_jit` frame. Inner `@unit_jit` calls skip boundary conversion entirely.
-4. **Return wrapping**: the SI unit of the return value is inferred from the first call and used to wrap subsequent results back into `Quantity`.
+4. **Return wrapping**: the SI unit of the return value is inferred from the first call and used to wrap subsequent results back into `Quantity`. The registry is also captured from that first result, so results always belong to the same registry that produced them — whether that is `unit_jit.ureg` or a user-supplied one.
 5. **Dimension guard**: argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
 
 The right entry point is the **outermost function that owns the hot loop**, not the leaf functions it calls.
@@ -205,6 +205,28 @@ class Model:
 ```
 
 `simulate` is the entry point: it owns the hot loop and is where boundary conversion happens. `rate` is called from within the fast zone, so it receives plain floats directly and its rewritten body runs without any Pint calls.
+
+### Custom registry
+
+You can use your own `UnitRegistry` instead of `unit_jit.ureg`. Results will be wrapped using whichever registry produced the first-call return value, so they interoperate naturally with the rest of your quantities.
+
+```python
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+my_ureg = UnitRegistry()
+
+@unit_jit
+def scale(x: Quantity, factor: float) -> Quantity:
+    return x * factor
+
+x = 3.0 * my_ureg.meter
+scale(x, 2.0)           # warm-up
+result = scale(x, 2.0)  # result is a Quantity in my_ureg
+result + 1.0 * my_ureg.meter  # works: same registry
+```
+
+The module-level `ureg` exported by `unit_jit` remains available as a convenience default; there is no requirement to use it.
 
 ## Debugging
 
