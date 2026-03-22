@@ -84,7 +84,7 @@ The speedup scales with loop length: the longer the loop, the more Pint overhead
 1. **Module-level compilation**: on first call, all `@unit_jit` functions in the same module are rewritten together: `.magnitude`, `.to_base_units()`, and `cast("Quantity", x)` are stripped from the source.
 2. **Eager snapshot**: Quantity attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is a plain dict lookup.
 3. **Fast zone**: a thread-local flag marks the outermost `@unit_jit` frame. Inner `@unit_jit` calls skip boundary conversion entirely.
-4. **Return wrapping**: the SI unit of the return value is inferred from the first call and used to wrap subsequent results back into `Quantity`. The registry is also captured from that first result, so results always belong to the same registry that produced them — whether that is `unit_jit.ureg` or a user-supplied one.
+4. **Return wrapping**: the SI unit of the return value is inferred from the first call and used to wrap subsequent results back into `Quantity`. The registry is also captured from that first result, so results always belong to the same registry that produced them, whether that is `unit_jit.ureg` or a user-supplied one.
 5. **Dimension guard**: argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
 
 The right entry point is the **outermost function that owns the hot loop**, not the leaf functions it calls.
@@ -234,7 +234,7 @@ model.rate(x0)  # warm-up: compiles the rewritten float version
 
 with fast_zone(model) as (fast_model,):
     for _ in range(600):
-        x_si = x_si + fast_model.rate(x_si) * dt_si  # raw SI floats throughout
+        x_si = x_si + fast_model.rate(x_si) * dt_si
 ```
 
 `fast_zone` accepts any number of objects and yields their snapshotted proxies in the same order. Quantity attributes on each object are converted to SI floats on entry; passing the proxy into `@unit_jit` methods inside the block incurs no further conversion cost.
@@ -246,7 +246,7 @@ plain Pint:  33.01 ms per call
 fast_zone:    0.69 ms per call  (48x vs plain)
 ```
 
-The large speedup here comes from the loop being entirely in float land — no Pint operations remain anywhere inside the block. This contrasts with cases where the surrounding loop code still uses Pint (e.g. stochastic simulations that reconstruct Quantities between steps), where the gain is more modest.
+The large speedup here comes from the loop being entirely in SI floats: no Pint operations remain anywhere inside the block. This contrasts with cases where the surrounding loop code still uses Pint (e.g. stochastic simulations that reconstruct Quantities between steps), where the gain is more modest.
 
 `fast_zone` nests safely: if already inside a fast zone, entering another is a no-op and objects are returned unconverted.
 
