@@ -108,6 +108,29 @@ uv sync --extra dev  # or: pip install -e ".[dev]"
 
 ## Usage
 
+### Skipping the warm-up
+
+By default the first call runs the original Pint function to infer what units the return value has. If that first call is expensive, declare the units upfront with `return_units` and it is skipped:
+
+```python
+# scalar return
+@unit_jit(return_units=ureg.m / ureg.s)
+def speed(d: Quantity, t: Quantity) -> Quantity:
+    return d / t
+
+# list return, all elements share the same unit
+@unit_jit(return_units=list[ureg.mol / ureg.L / ureg.s])
+def reaction_rates(self, state: list[Quantity]) -> list[Quantity]:
+    return [self.alpha, self.delta * state[0]]
+
+# list return, mixed units (one declaration per element)
+@unit_jit(return_units=[ureg.mol / ureg.L / ureg.s, ureg.dimensionless / ureg.s])
+def mixed_rates(self, state: list[Quantity]) -> list[Quantity]:
+    return [self.alpha, self.k * state[0]]
+```
+
+Both `Unit` and `Quantity` objects are accepted; only the unit is used, not the magnitude.
+
 ### Scalar loop
 
 The primary use case is a tight loop over scalars. `unit_jit` rewrites the function body so that all Pint calls disappear: `ureg.nmol / ureg.L` becomes the corresponding SI float, `.to_base_units()` is stripped, and arithmetic runs on plain floats. The result is wrapped back into a `Quantity` with the units inferred from the first call.

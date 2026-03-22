@@ -164,7 +164,7 @@ def test_simulate_matches_pint_baseline():
 
 
 def test_custom_registry_result_uses_same_registry():
-    """Results wrapped by unit_jit must belong to the user's registry, not unit_jit's internal one."""
+    """Results wrapped by unit_jit must belong to the user's registry, not unit_jit's internal."""
     from pint import UnitRegistry
 
     my_ureg = UnitRegistry()
@@ -183,7 +183,7 @@ def test_custom_registry_result_uses_same_registry():
 
 
 def test_custom_registry_interop_with_other_quantities():
-    """Returned Quantity from unit_jit can be combined with other Quantities from the same registry."""
+    """Result from unit_jit can be combined with Quantities from the same registry."""
     from pint import UnitRegistry
 
     my_ureg = UnitRegistry()

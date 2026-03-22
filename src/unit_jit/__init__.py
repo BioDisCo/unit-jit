@@ -24,13 +24,14 @@ import inspect
 import logging
 import textwrap
 import threading
+import types
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, overload
 
 import libcst as cst
-from pint import Quantity, UnitRegistry
+from pint import Quantity, Unit, UnitRegistry
 
 ureg = UnitRegistry()
 _log = logging.getLogger(__name__)
@@ -211,13 +212,50 @@ def _infer_units(result: Any) -> tuple[Any, UnitRegistry | None]:
     return None, None
 
 
+def _parse_return_units(return_units: Any) -> tuple[Any, UnitRegistry | None]:
+    """Convert a user-supplied return_units declaration to internal (unit_info, registry) format.
+
+    Accepts Quantity or Unit objects (or lists/tuples thereof):
+      - a single Quantity or Unit  -> scalar unit_info
+      - a list/tuple thereof       -> (container_type, [units]) unit_info
+    """
+
+    def _to_unit_and_reg(r: Any) -> tuple[Any, UnitRegistry | None]:
+        if isinstance(r, Quantity):
+            return r.to_base_units().units, r._REGISTRY  # noqa: SLF001
+        if isinstance(r, Unit):
+            return (1 * r).to_base_units().units, r._REGISTRY  # noqa: SLF001
+        return None, None
+
+    if isinstance(return_units, (Quantity, Unit)):
+        unit, reg = _to_unit_and_reg(return_units)
+        return unit, reg
+    if isinstance(return_units, types.GenericAlias):
+        # list[ureg.mol/ureg.L/ureg.s]: one unit applied to all elements
+        unit, reg = _to_unit_and_reg(return_units.__args__[0])
+        return (return_units.__origin__, unit), reg
+    if isinstance(return_units, (list, tuple)):
+        units, reg = [], None
+        for r in return_units:
+            u, r_ = _to_unit_and_reg(r)
+            units.append(u)
+            if reg is None:
+                reg = r_
+        return (type(return_units), units), reg
+    return None, None
+
+
 def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry) -> Any:
     """Wrap a float/array result back into a Quantity using cached SI units."""
     if unit_info is None:
         return result
     if isinstance(unit_info, tuple):
         cls, units = unit_info
-        return cls(wrap_ureg.Quantity(r, u) if u is not None else r for r, u in zip(result, units))
+        if isinstance(units, list):
+            return cls(
+                wrap_ureg.Quantity(r, u) if u is not None else r for r, u in zip(result, units)
+            )
+        return cls(wrap_ureg.Quantity(r, units) for r in result)
     return wrap_ureg.Quantity(result, unit_info)
 
 
@@ -285,22 +323,27 @@ def get_rewritten_source(func: Callable[..., Any]) -> str:
 
 
 @overload
-def unit_jit(func: type, *, use_numba: bool = ...) -> type: ...
+def unit_jit(func: type, *, use_numba: bool = ..., return_units: Any = ...) -> type: ...
 
 
 @overload
-def unit_jit[**P, R](func: Callable[P, R], *, use_numba: bool = ...) -> Callable[P, R]: ...
+def unit_jit[**P, R](
+    func: Callable[P, R], *, use_numba: bool = ..., return_units: Any = ...
+) -> Callable[P, R]: ...
 
 
 @overload
-def unit_jit(func: None = ..., *, use_numba: bool = ...) -> Callable[[Any], Any]: ...
+def unit_jit(
+    func: None = ..., *, use_numba: bool = ..., return_units: Any = ...
+) -> Callable[[Any], Any]: ...
 
 
-def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
+def unit_jit(func: Any = None, *, use_numba: bool = False, return_units: Any = None) -> Any:
     """JIT decorator for functions and classes: strips Pint overhead, runs fast after first call.
 
     When applied to a function:
     - First call: runs original function (Pint), infers return units, caches them.
+      Skipped entirely if return_units is provided.
     - Subsequent calls: converts args to SI floats, runs rewritten version,
       wraps result back into Quantity with cached units.
     - If called from within the fast zone (inner call): skips boundary
@@ -314,14 +357,21 @@ def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
             float function. Requires numba to be installed. Best suited for
             functions whose rewritten body is pure float/NumPy with no calls
             to other @unit_jit-decorated functions.
+        return_units: declare return units upfront to skip the warm-up call.
+            Pass a Quantity for scalar returns or a list of Quantities for list
+            returns. The magnitude is ignored; only the unit is used.
+            Example: return_units=ureg.mol/ureg.L/ureg.s
+            Example: return_units=[ureg.mol/ureg.L/ureg.s, ureg.mol/ureg.L/ureg.s]
     """
     if func is None:
-        return lambda f: unit_jit(f, use_numba=use_numba)
+        return lambda f: unit_jit(f, use_numba=use_numba, return_units=return_units)
 
     if isinstance(func, type):
         for name, method in func.__dict__.items():
             if inspect.isfunction(method) and not name.startswith("__"):
-                setattr(func, name, unit_jit(method, use_numba=use_numba))
+                setattr(
+                    func, name, unit_jit(method, use_numba=use_numba, return_units=return_units)
+                )
         return func
 
     if use_numba:
@@ -329,6 +379,11 @@ def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
 
     module_name = func.__module__
     _registry[module_name].append(func)
+
+    if return_units is not None:
+        unit_info, reg = _parse_return_units(return_units)
+        _return_units[func.__qualname__] = unit_info
+        _return_registry[func.__qualname__] = reg if reg is not None else ureg
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if module_name not in _compiled:
@@ -360,20 +415,22 @@ def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
             return result
 
         # Subsequent calls: check dimensions, convert, run fast version, wrap result.
-        pos_dims, kw_dims = _arg_dims[qualname]
-        for i, (arg, dim) in enumerate(zip(args, pos_dims)):
-            if dim is not None and isinstance(arg, Quantity) and arg.dimensionality != dim:
-                raise TypeError(
-                    f"{func.__qualname__}: argument {i} has dimensions "
-                    f"{dict(arg.dimensionality)}, expected {dict(dim)}"
-                )
-        for key, dim in kw_dims.items():
-            arg = kwargs.get(key)
-            if dim is not None and isinstance(arg, Quantity) and arg.dimensionality != dim:  # type: ignore[union-attr]
-                raise TypeError(
-                    f"{func.__qualname__}: argument '{key}' has dimensions "
-                    f"{dict(arg.dimensionality)}, expected {dict(dim)}"  # type: ignore[union-attr]
-                )
+        # Skipped when return_units is declared (no warm-up call to populate _arg_dims).
+        if qualname in _arg_dims:
+            pos_dims, kw_dims = _arg_dims[qualname]
+            for i, (arg, dim) in enumerate(zip(args, pos_dims)):
+                if dim is not None and isinstance(arg, Quantity) and arg.dimensionality != dim:
+                    raise TypeError(
+                        f"{func.__qualname__}: argument {i} has dimensions "
+                        f"{dict(arg.dimensionality)}, expected {dict(dim)}"
+                    )
+            for key, dim in kw_dims.items():
+                arg = kwargs.get(key)
+                if dim is not None and isinstance(arg, Quantity) and arg.dimensionality != dim:  # type: ignore[union-attr]
+                    raise TypeError(
+                        f"{func.__qualname__}: argument '{key}' has dimensions "
+                        f"{dict(arg.dimensionality)}, expected {dict(dim)}"  # type: ignore[union-attr]
+                    )
         fast_args = tuple(_to_fast(a) for a in args)
         fast_kwargs = {k: _to_fast(v) for k, v in kwargs.items()}
         _fast_zone.active = True
