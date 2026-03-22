@@ -206,6 +206,50 @@ class Model:
 
 `simulate` is the entry point: it owns the hot loop and is where boundary conversion happens. `rate` is called from within the fast zone, so it receives plain floats directly and its rewritten body runs without any Pint calls.
 
+### Owning the loop with `fast_zone`
+
+Sometimes you write the simulation loop yourself but call `@unit_jit`-decorated functions from a library inside it. Use `fast_zone` to declare the boundary explicitly: list the objects that cross it, pay the conversion cost once on entry, and work in pure floats throughout.
+
+```python
+from unit_jit import fast_zone, unit_jit, ureg
+from pint import Quantity
+
+@unit_jit
+class DecayModel:
+    def __init__(self, alpha: Quantity, delta: Quantity) -> None:
+        self.alpha = alpha   # Quantity attrs converted to SI floats at fast_zone entry
+        self.delta = delta
+
+    def rate(self, x: Quantity) -> Quantity:
+        return self.alpha - self.delta * x
+
+model = DecayModel(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s)
+x0    = 5.0 * ureg.mol / ureg.L
+dt    = 0.1 * ureg.s
+
+x_si  = x0.to_base_units().magnitude   # strip units once before the loop
+dt_si = dt.to_base_units().magnitude
+
+model.rate(x0)  # warm-up: compiles the rewritten float version
+
+with fast_zone(model) as (fast_model,):
+    for _ in range(600):
+        x_si = x_si + fast_model.rate(x_si) * dt_si  # raw SI floats throughout
+```
+
+`fast_zone` accepts any number of objects and yields their snapshotted proxies in the same order. Quantity attributes on each object are converted to SI floats on entry; passing the proxy into `@unit_jit` methods inside the block incurs no further conversion cost.
+
+On Apple M3 Pro (600 steps, 500 repetitions):
+
+```
+plain Pint:  33.01 ms per call
+fast_zone:    0.69 ms per call  (48x vs plain)
+```
+
+The large speedup here comes from the loop being entirely in float land — no Pint operations remain anywhere inside the block. This contrasts with cases where the surrounding loop code still uses Pint (e.g. stochastic simulations that reconstruct Quantities between steps), where the gain is more modest.
+
+`fast_zone` nests safely: if already inside a fast zone, entering another is a no-op and objects are returned unconverted.
+
 ### Custom registry
 
 You can use your own `UnitRegistry` instead of `unit_jit.ureg`. Results will be wrapped using whichever registry produced the first-call return value, so they interoperate naturally with the rest of your quantities.

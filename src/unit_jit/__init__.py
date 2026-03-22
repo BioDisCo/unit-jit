@@ -25,7 +25,8 @@ import logging
 import textwrap
 import threading
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, overload
 
 import libcst as cst
@@ -46,6 +47,42 @@ _return_registry: dict[str, UnitRegistry] = {}  # qualname -> registry used to w
 
 def _in_fast_zone() -> bool:
     return getattr(_fast_zone, "active", False)
+
+
+@contextmanager
+def fast_zone(*objects: Any) -> Iterator[tuple[Any, ...]]:
+    """Enter the fast zone manually for a block of code.
+
+    Any @unit_jit-decorated function called within this block skips boundary
+    conversion and returns raw SI float values. Use this when you own the loop
+    but not the functions called inside it: declare which objects cross the
+    boundary, pay the conversion cost once on entry, and work in floats
+    throughout.
+
+    Nests safely: if already inside a fast zone, this is a no-op and objects
+    are returned unconverted.
+
+    Args:
+        *objects: objects whose Quantity attributes should be converted to SI
+            floats on entry. The converted proxies are yielded, one per object.
+
+    Example:
+        with fast_zone(self) as (fast_self,):
+            while ...:
+                rates_si = fast_self.reaction_rates(conc_si)  # raw floats
+
+        with fast_zone(self, params) as (fast_self, fast_params):
+            ...
+    """
+    already_active = _in_fast_zone()
+    snapped = tuple(objects if already_active else (_snapshot(o) for o in objects))
+    if not already_active:
+        _fast_zone.active = True
+    try:
+        yield snapped
+    finally:
+        if not already_active:
+            _fast_zone.active = False
 
 
 # CST transformer
@@ -103,6 +140,24 @@ class _QuantityStripper(cst.CSTTransformer):
 # Boundary helpers
 
 _SNAP_KEY = "__unit_jit_snap__"
+
+
+def snapshot(obj: Any) -> Any:
+    """Convert all Quantity attributes of obj to SI floats, returning a fast proxy.
+
+    Use this before a fast_zone block to pay the conversion cost once rather than
+    on every decorated call inside the loop:
+
+        fast_self = snapshot(self)
+        with fast_zone():
+            while ...:
+                rates = fast_self.reaction_rates(state_si)
+
+    The returned proxy is an instance of the same class (method lookup still works)
+    but with float-valued attributes. Passing it repeatedly into @unit_jit functions
+    inside the fast zone incurs no further conversion overhead.
+    """
+    return _snapshot(obj)
 
 
 def _snapshot(obj: Any) -> Any:

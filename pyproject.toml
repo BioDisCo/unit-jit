@@ -13,6 +13,7 @@ license = { text = "Apache-2.0" }
 dependencies = [
     "pint>=0.24",
     "libcst>=1.4",
+    "numba>=0.64.0",
 ]
 
 [project.optional-dependencies]
