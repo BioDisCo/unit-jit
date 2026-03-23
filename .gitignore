@@ -212,4 +212,7 @@ uv.lock
 # macOS
 .DS_Store
 
+# ai
+CLAUDE.md
+
 
