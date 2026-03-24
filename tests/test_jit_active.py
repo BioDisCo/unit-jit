@@ -6,10 +6,9 @@ These tests check the internal state to confirm that:
 """
 
 import pytest
-
-import unit_jit as _uj
 from pint import Quantity
 
+import unit_jit as _uj
 from unit_jit import get_rewritten_source, unit_jit, ureg
 
 
@@ -17,9 +16,7 @@ def _jit_active(func: object) -> bool:
     """Return True if JIT is active for func (inference succeeded, fast path used)."""
     qualname = getattr(func, "__qualname__", None)
     return (
-        qualname is not None
-        and qualname in _uj._return_units
-        and qualname not in _uj._jit_disabled
+        qualname is not None and qualname in _uj._return_units and qualname not in _uj._jit_disabled
     )
 
 
