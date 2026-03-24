@@ -225,6 +225,34 @@ result + 1.0 * my_ureg.meter  # works: same registry
 
 The module-level `ureg` exported by `unit_jit` remains available as a convenience default; there is no requirement to use it.
 
+### Pre-compilation with input_args
+
+By default, unit inference runs on the first call. Pass `input_args` to the decorator to trigger it at decoration time instead, so every subsequent call is immediately fast.
+
+```python
+import numpy as np
+from pint import Quantity
+from unit_jit import unit_jit, ureg
+
+@unit_jit(input_args=(ureg.m, ureg.s))
+def velocity(d: Quantity, t: Quantity) -> Quantity:
+    return d / t
+
+velocity(10 * ureg.m, 2 * ureg.s)  # already fast: inference already ran
+```
+
+Bare units like `ureg.m` are treated as `1 * ureg.m`. Full `Quantity` values work too, and so do `Quantity` wrapping NumPy arrays:
+
+```python
+@unit_jit(input_args=(np.array([1.0, 2.0, 3.0]) * ureg.m,))
+def path_total(path: Quantity) -> Quantity:
+    return np.sum(path)
+
+path_total(np.array([10.0, 20.0]) * ureg.m)  # already fast
+```
+
+Note: `input_args` compiles all `@unit_jit` functions registered in the module up to that point. If the entry point is defined after other `@unit_jit` functions it calls, that ordering is fine: decorate the callees first, then decorate the entry point with `input_args`.
+
 ## Debugging
 
 To inspect what code actually runs after rewriting, use `get_rewritten_source`. It triggers compilation if needed and returns the rewritten function source as a string.

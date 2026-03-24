@@ -5,6 +5,8 @@ These tests check the internal state to confirm that:
 - inference correctly failed and the function is marked as JIT-disabled.
 """
 
+import pytest
+
 import unit_jit as _uj
 from pint import Quantity
 
@@ -84,7 +86,7 @@ def test_class_method_jit_active():
 
 
 def test_input_args_jit_active_before_explicit_call():
-    @unit_jit(input_args=(10 * ureg.m, 2 * ureg.s))
+    @unit_jit(input_args=(ureg.m, ureg.s))
     def _input_args_fn(d: Quantity, t: Quantity) -> Quantity:
         return d / t
 
@@ -93,13 +95,22 @@ def test_input_args_jit_active_before_explicit_call():
 
 
 def test_input_args_result_correct():
-    @unit_jit(input_args=(10 * ureg.m, 2 * ureg.s))
+    @unit_jit(input_args=(ureg.m, ureg.s))
     def _input_args_result(d: Quantity, t: Quantity) -> Quantity:
         return d / t
 
     result = _input_args_result(6 * ureg.m, 3 * ureg.s)
     assert isinstance(result, Quantity)
     assert abs(result.to_base_units().magnitude - 2.0) < 1e-12
+
+
+def test_input_args_wrong_dimension_raises():
+    @unit_jit(input_args=(ureg.m, ureg.s))
+    def _input_args_dim(d: Quantity, t: Quantity) -> Quantity:
+        return d / t
+
+    with pytest.raises(TypeError):
+        _input_args_dim(10 * ureg.m, 2 * ureg.m)  # m/m: wrong dimension for t
 
 
 # JIT disabled when inference fails (source not inspectable)

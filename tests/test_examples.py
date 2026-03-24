@@ -219,3 +219,28 @@ def test_speeds_non_si_units():
     result = speeds(d, t)
     expected = np.array([10000.0 / 7200.0, 20000.0 / 14400.0, 30000.0 / 18000.0])
     np.testing.assert_allclose(result.to_base_units().magnitude, expected, rtol=1e-12)
+
+
+# input_args: pre-compilation at decoration time
+
+
+@unit_jit(input_args=(ureg.m, ureg.s))
+def _velocity_precompiled(d: Quantity, t: Quantity) -> Quantity:
+    return d / t
+
+
+@unit_jit(input_args=(np.array([1.0, 2.0, 3.0]) * ureg.m,))
+def _path_total_precompiled(path: Quantity) -> Quantity:
+    return np.sum(path)
+
+
+def test_input_args_scalar_result():
+    result = _velocity_precompiled(20 * ureg.m, 4 * ureg.s)
+    assert isinstance(result, Quantity)
+    assert abs(result.to_base_units().magnitude - 5.0) < 1e-12
+
+
+def test_input_args_numpy_result():
+    result = _path_total_precompiled(np.array([10.0, 20.0, 30.0]) * ureg.m)
+    assert isinstance(result, Quantity)
+    assert abs(result.to_base_units().magnitude - 60.0) < 1e-12

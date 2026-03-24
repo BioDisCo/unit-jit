@@ -32,7 +32,7 @@ from collections.abc import Callable
 from typing import Any, overload
 
 import libcst as cst
-from pint import Quantity, UnitRegistry
+from pint import Quantity, Unit, UnitRegistry
 
 from unit_jit._inferrer import (  # noqa: E402
     _SENTINEL,
@@ -373,5 +373,5 @@ def unit_jit(
     wrapper.__doc__ = func.__doc__
     wrapper.__annotations__ = func.__annotations__
     if input_args is not None:
-        wrapper(*input_args)
+        wrapper(*(1 * a if isinstance(a, Unit) else a for a in input_args))
     return wrapper  # type: ignore[return-value]

@@ -33,6 +33,11 @@ def _velocity_loop(n: int) -> Quantity:
     return v
 
 
+@unit_jit
+def _div_kw(d: Quantity, *, t: Quantity) -> Quantity:
+    return cast("Quantity", d / t)
+
+
 @dataclass
 class _Params:
     alpha: Quantity
@@ -102,10 +107,17 @@ def test_quantity_return_wrapped():
 
 
 def test_dimension_mismatch_raises():
-    """Second call with wrong dimension raises TypeError."""
+    """Second call with wrong positional dimension raises TypeError."""
     _div(10 * ureg.m, 2 * ureg.s)  # warm-up: arg1=[length], arg2=[time]
     with pytest.raises(TypeError, match="dimensions"):
         _div(10 * ureg.m, 2 * ureg.m)  # arg2 is [length], expected [time]
+
+
+def test_kwarg_dimension_mismatch_raises():
+    """Second call with wrong keyword argument dimension raises TypeError."""
+    _div_kw(10 * ureg.m, t=2 * ureg.s)  # warm-up
+    with pytest.raises(TypeError, match="dimensions"):
+        _div_kw(10 * ureg.m, t=2 * ureg.m)  # t is [length], expected [time]
 
 
 # Class with snapshot

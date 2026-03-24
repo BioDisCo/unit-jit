@@ -3,6 +3,7 @@
 from typing import cast
 
 import numpy as np
+import pytest
 from pint import Quantity
 
 from unit_jit import unit_jit, ureg
@@ -68,6 +69,15 @@ def test_vec_div_non_si_units():
     _vec_div(v_cm, t_ms)  # warm-up
     result = _vec_div(v_cm, t_ms)
     np.testing.assert_allclose(result.to_base_units().magnitude, [1.5, 2.0], rtol=1e-12)
+
+
+def test_vec_div_wrong_array_dimension_raises():
+    """Array argument with wrong dimension raises TypeError."""
+    v = np.array([3.0, 4.0]) * ureg.m
+    t = 2.0 * ureg.s
+    _vec_div(v, t)  # warm-up: d=[length], t=[time]
+    with pytest.raises(TypeError, match="dimensions"):
+        _vec_div(np.array([1.0, 2.0]) * ureg.m / ureg.s, t)  # d is [velocity], expected [length]
 
 
 # Array Quantity in, scalar out
