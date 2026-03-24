@@ -110,6 +110,58 @@ def test_input_args_wrong_dimension_raises():
         _input_args_dim(10 * ureg.m, 2 * ureg.m)  # m/m: wrong dimension for t
 
 
+# __init_subclass__ automatic decoration
+
+
+class _AutoJitBase:
+    """Base class that applies @unit_jit to reaction_rates in subclasses transparently."""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if "reaction_rates" in cls.__dict__:
+            cls.reaction_rates = unit_jit(cls.reaction_rates)
+
+
+class _UserModel(_AutoJitBase):
+    def __init__(self, delta: Quantity, gamma: Quantity) -> None:
+        self.delta = delta
+        self.gamma = gamma
+
+    # No @unit_jit here: applied automatically by _AutoJitBase.__init_subclass__
+    def reaction_rates(self, state: list[Quantity]) -> list[Quantity]:
+        return [self.delta * state[0], self.gamma]
+
+
+def test_init_subclass_result_correct():
+    """Auto-decorated reaction_rates returns list[Quantity] without explicit @unit_jit."""
+    model = _UserModel(0.5 / ureg.s, 0.1 * ureg.mol / ureg.L / ureg.s)
+    state = [10.0 * ureg.mol / ureg.L]
+    result = model.reaction_rates(state)
+    assert isinstance(result, list)
+    assert all(isinstance(r, Quantity) for r in result)
+    assert abs(result[0].to_base_units().magnitude - (0.5 / ureg.s * state[0]).to_base_units().magnitude) < 1e-12
+    assert abs(result[1].to_base_units().magnitude - (0.1 * ureg.mol / ureg.L / ureg.s).to_base_units().magnitude) < 1e-12
+
+
+def test_init_subclass_jit_active_after_first_call():
+    """After the first call, __init_subclass__-decorated reaction_rates is JIT-compiled."""
+    model = _UserModel(0.5 / ureg.s, 0.1 * ureg.mol / ureg.L / ureg.s)
+    model.reaction_rates([10.0 * ureg.mol / ureg.L])
+    assert _jit_active(model.reaction_rates)
+
+
+def test_init_subclass_fast_path_matches_pint():
+    """Warm call result matches the plain-Pint baseline."""
+    delta = 0.5 / ureg.s
+    gamma = 0.1 * ureg.mol / ureg.L / ureg.s
+    state = [10.0 * ureg.mol / ureg.L]
+    model = _UserModel(delta, gamma)
+    model.reaction_rates(state)  # warm-up
+    result = model.reaction_rates(state)
+    assert abs(result[0].to_base_units().magnitude - (delta * state[0]).to_base_units().magnitude) < 1e-12
+    assert abs(result[1].to_base_units().magnitude - gamma.to_base_units().magnitude) < 1e-12
+
+
 # JIT disabled when inference fails (source not inspectable)
 
 

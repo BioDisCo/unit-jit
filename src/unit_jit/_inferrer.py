@@ -28,6 +28,24 @@ _SENTINEL: object = object()
 _UNKNOWN: object = object()
 
 
+class _ListReturn:
+    """Unit info for a function returning list[Quantity] or tuple[Quantity, ...]."""
+
+    __slots__ = ("kind", "units")
+
+    def __init__(self, kind: str, units: list[Any]) -> None:
+        self.kind = kind
+        self.units = units
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, _ListReturn)
+            and self.kind == other.kind
+            and len(self.units) == len(other.units)
+            and all(u1 == u2 for u1, u2 in zip(self.units, other.units))
+        )
+
+
 # ---------------------------------------------------------------------------
 # Unit arithmetic helpers
 # ---------------------------------------------------------------------------
@@ -301,11 +319,19 @@ _KNOWN_CALLS: dict[str, Callable[[list[Any]], Any]] = {
 def _extract_attr_units(obj: Any) -> dict[str, Any]:
     """Recursively extract Quantity attribute units from an object into a nested dict."""
     result: dict[str, Any] = {}
-    for k, v in getattr(obj, "__dict__", {}).items():
+    if hasattr(type(obj), "_fields"):  # NamedTuple: use _asdict() since no __dict__
+        items = obj._asdict().items()
+    else:
+        items = getattr(obj, "__dict__", {}).items()
+    for k, v in items:
         if k == _SNAP_KEY:
             continue
         if isinstance(v, Quantity):
             result[k] = v.to_base_units().units
+        elif hasattr(type(v), "_fields"):  # nested NamedTuple
+            nested = _extract_attr_units(v)
+            if nested:
+                result[k] = nested
         elif hasattr(v, "__dict__") and not callable(v) and not hasattr(v, "__array_interface__"):
             nested = _extract_attr_units(v)
             if nested:
@@ -349,16 +375,12 @@ class _UnitInferrer:
 
     def _block(self, stmts: Any) -> None:
         for stmt in stmts:
-            if self._return is not _SENTINEL:
-                break
             self._stmt(stmt)
 
     def _stmt(self, node: Any) -> None:
         if isinstance(node, cst.SimpleStatementLine):
             for small in node.body:
                 self._small(small)
-                if self._return is not _SENTINEL:
-                    break
         elif isinstance(node, cst.If):
             self._if(node)
         elif isinstance(node, (cst.For, cst.While)):
@@ -388,7 +410,21 @@ class _UnitInferrer:
             lhs = self.env.get(node.target.value) if isinstance(node.target, cst.Name) else None
             self._bind(node.target, self._binop(node.operator, lhs, self._expr(node.value)))
         elif isinstance(node, cst.Return):
-            self._return = self._expr(node.value) if node.value is not None else None
+            new_ret = self._expr(node.value) if node.value is not None else None
+            if (
+                self._return is not _SENTINEL
+                and self._return is not None
+                and new_ret is not None
+                and hasattr(self._return, "dimensionality")
+                and hasattr(new_ret, "dimensionality")
+                and self._return.dimensionality != new_ret.dimensionality
+            ):
+                raise TypeError(
+                    f"inconsistent return dimensions: "
+                    f"{self._return} ({dict(self._return.dimensionality)}) vs "
+                    f"{new_ret} ({dict(new_ret.dimensionality)})"
+                )
+            self._return = new_ret
 
     def _bind(self, target: Any, unit: Any) -> None:
         if isinstance(target, cst.Name):
@@ -416,7 +452,23 @@ class _UnitInferrer:
             for k in set(env_then) | set(env_else)
         }
         if ret_then is not _SENTINEL and ret_else is not _SENTINEL:
-            self._return = ret_then if ret_then == ret_else else None
+            if ret_then == ret_else:
+                self._return = ret_then
+            else:
+                # Both branches return: check that dimensionality agrees.
+                if (
+                    ret_then is not None
+                    and ret_else is not None
+                    and hasattr(ret_then, "dimensionality")
+                    and hasattr(ret_else, "dimensionality")
+                    and ret_then.dimensionality != ret_else.dimensionality
+                ):
+                    raise TypeError(
+                        f"inconsistent return dimensions across branches: "
+                        f"{ret_then} ({dict(ret_then.dimensionality)}) vs "
+                        f"{ret_else} ({dict(ret_else.dimensionality)})"
+                    )
+                self._return = None  # same dimensionality, different scale: no wrapping
         else:
             self._return = ret_then if ret_then is not _SENTINEL else ret_else
 
@@ -448,11 +500,20 @@ class _UnitInferrer:
         if isinstance(node, cst.IfExp):
             t, f = self._expr(node.body), self._expr(node.orelse)
             return t if t == f else None
-        if isinstance(node, (cst.List, cst.Tuple)):
-            units = [self._expr(el.value) for el in node.elements]
-            return next((u for u in units if u is not None), None)
+        if isinstance(node, cst.List):
+            return _ListReturn("list", [self._expr(el.value) for el in node.elements])
+        if isinstance(node, cst.Tuple):
+            return _ListReturn("tuple", [self._expr(el.value) for el in node.elements])
         if isinstance(node, cst.Subscript):
-            return self._expr(node.value)
+            container = self._expr(node.value)
+            if isinstance(container, _ListReturn) and node.slice:
+                slice_node = node.slice[0].slice
+                if isinstance(slice_node, cst.Index):
+                    idx = _eval_literal(slice_node.value)
+                    if idx is not None and 0 <= int(idx) < len(container.units):
+                        return container.units[int(idx)]
+                return None  # unknown index: conservative
+            return container
         return None
 
     def _get_obj_map(self, node: Any) -> dict[str, Any] | None:
@@ -554,6 +615,8 @@ class _UnitInferrer:
         return ""
 
     def _binop(self, op: Any, left: Any, right: Any, right_node: Any = None) -> Any:
+        if isinstance(left, _ListReturn) or isinstance(right, _ListReturn):
+            return _UNKNOWN
         try:
             if isinstance(op, (cst.Add, cst.Subtract)):
                 # Propagate _UNKNOWN without raising: cannot check an unknown unit.
@@ -629,6 +692,10 @@ def infer_return_units(
         def _arg_unit(arg: Any) -> Any:
             if isinstance(arg, Quantity):
                 return arg.to_base_units().units
+            if isinstance(arg, list):
+                return _ListReturn("list", [_arg_unit(el) for el in arg])
+            if isinstance(arg, tuple):
+                return _ListReturn("tuple", [_arg_unit(el) for el in arg])
             attr_units = _extract_attr_units(arg)
             return attr_units if attr_units else None
 
@@ -657,9 +724,16 @@ def infer_return_units(
             # so return unit cannot be determined; JIT will be disabled for this function.
             return _SENTINEL, None
 
-        reg = next((a._REGISTRY for a in args if isinstance(a, Quantity)), None)  # noqa: SLF001
-        reg = reg or next(  # noqa: SLF001
-            (v._REGISTRY for v in kwargs.values() if isinstance(v, Quantity)), None
+        def _find_reg(arg: Any) -> UnitRegistry | None:
+            if isinstance(arg, Quantity):
+                return arg._REGISTRY  # noqa: SLF001
+            if isinstance(arg, (list, tuple)):
+                return next((r for el in arg if (r := _find_reg(el)) is not None), None)
+            return None
+
+        reg = next((r for a in args if (r := _find_reg(a)) is not None), None)
+        reg = reg or next(
+            (r for v in kwargs.values() if (r := _find_reg(v)) is not None), None
         )
         reg = reg or next(iter(ureg_vars.values()), default_ureg)
         return inferred, reg

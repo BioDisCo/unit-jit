@@ -203,6 +203,73 @@ def test_body_if_branch_mismatched_constant_raises():
         _bad_branch(10 * ureg.m, 2 * ureg.s, True)
 
 
+def test_body_if_branch_inconsistent_return_raises():
+    """Branches returning different dimensions are caught by the inferrer."""
+
+    @unit_jit
+    def _inconsistent_return(d: Quantity, t: Quantity, flag: bool) -> Quantity:
+        if flag:
+            return cast("Quantity", d / t)  # [velocity]
+        return d  # [length]
+
+    with pytest.raises(TypeError):
+        _inconsistent_return(10 * ureg.m, 2 * ureg.s, True)
+
+
+def test_self_attr_dimension_mismatch_in_body_raises():
+    """Method body that adds self.alpha (rate) and self.volume (volume) is caught at inference."""
+
+    class _BadModel:
+        def __init__(self, alpha: Quantity, volume: Quantity) -> None:
+            self.alpha = alpha
+            self.volume = volume
+
+        @unit_jit
+        def run(self, x: Quantity) -> Quantity:
+            return cast("Quantity", self.alpha + self.volume)  # [1/s] + [volume]
+
+    model = _BadModel(0.5 / ureg.s, 1.0 * ureg.L)
+    with pytest.raises(TypeError):
+        model.run(1.0 * ureg.mol / ureg.L)
+
+
+def test_namedtuple_params_body_dimension_mismatch_raises():
+    """Method body that adds two NamedTuple params of incompatible dimensions is caught at inference."""
+
+    class _BadNTModel:
+        def __init__(self, params: _NTParams) -> None:
+            self.params = params
+
+        @unit_jit
+        def run(self, x: Quantity) -> Quantity:
+            # alpha is 1/s, x is mol/L: alpha*x is mol/L/s; params.delta is also 1/s
+            # adding mol/L/s and 1/s is a dimension error
+            return cast("Quantity", self.params.alpha * x + self.params.delta)
+
+    model = _BadNTModel(_NTParams(alpha=2.0 / ureg.s, delta=0.5 / ureg.s))
+    with pytest.raises(TypeError):
+        model.run(3.0 * ureg.mol / ureg.L)
+
+
+def test_while_loop_body_dimension_error_raises():
+    """Accumulating with wrong-dimension increment inside a while loop is caught at inference."""
+
+    class _BadLoop:
+        def __init__(self, volume: Quantity) -> None:
+            self.volume = volume
+
+        @unit_jit
+        def run(self, max_time: Quantity, rate: Quantity) -> Quantity:
+            time = 0.0 * ureg.s
+            while time < max_time:
+                time = cast("Quantity", time + self.volume)  # [time] + [volume]
+            return time
+
+    model = _BadLoop(1.0 * ureg.L)
+    with pytest.raises(TypeError):
+        model.run(10.0 * ureg.s, 1.0 / ureg.s)
+
+
 # Class with snapshot
 
 
@@ -255,6 +322,77 @@ def test_simulate_matches_pint_baseline():
     np.testing.assert_allclose(fast_out, pint_out, rtol=1e-10)
 
 
+# While loop with Quantity accumulation and self Quantity attribute
+
+
+class _WhileAccumulator:
+    """Minimal Gillespie-style model: Quantity attribute on self, while loop, time accumulation."""
+
+    def __init__(self, volume: Quantity) -> None:
+        self.volume = volume  # [length^3]
+
+    @unit_jit
+    def run(self, max_time: Quantity, rate: Quantity) -> Quantity:
+        """Accumulate time in a while loop; tau uses self.volume directly.
+
+        rate: [1 / (volume * time)], tau = 1 / (rate * self.volume): [time]
+        """
+        tau = 1.0 / (rate * self.volume)
+        time = 0.0 * ureg.s
+        while time < max_time:
+            time = cast("Quantity", time + tau)
+        return time
+
+
+def test_while_loop_quantity_accumulation_result():
+    """While loop correctly accumulates a Quantity: result is in [max_time, max_time + tau)."""
+    # rate = 0.5 / (L * s), volume = 1 L => tau ~ 2 s
+    max_time = 10.0 * ureg.s
+    rate = 0.5 / ureg.L / ureg.s
+    volume = 1.0 * ureg.L
+    model = _WhileAccumulator(volume)
+    result = model.run(max_time, rate)
+    tau = 1.0 / (rate * volume)
+    assert isinstance(result, Quantity)
+    assert result.to(ureg.s).magnitude >= max_time.to(ureg.s).magnitude - 1e-10
+    assert result.to(ureg.s).magnitude < (max_time + tau).to(ureg.s).magnitude + 1e-10
+
+
+def test_while_loop_self_volume_attribute():
+    """self.volume Quantity attribute is read correctly: result in [max_time, max_time + tau)."""
+    # rate = 1 / (L * s), volume = 2 L => tau ~ 0.5 s
+    max_time = 1.0 * ureg.s
+    rate = 1.0 / ureg.L / ureg.s
+    volume = 2.0 * ureg.L
+    model = _WhileAccumulator(volume)
+    model.run(max_time, rate)  # warm-up
+    result = model.run(max_time, rate)
+    tau = 1.0 / (rate * volume)
+    assert isinstance(result, Quantity)
+    assert result.to(ureg.s).magnitude >= max_time.to(ureg.s).magnitude - 1e-10
+    assert result.to(ureg.s).magnitude < (max_time + tau).to(ureg.s).magnitude + 1e-10
+
+
+def test_while_loop_matches_pint_baseline():
+    """Fast path gives the same result as plain Pint."""
+    volume = 1.5 * ureg.L
+    rate = 2.0 / ureg.L / ureg.s  # tau = 1/(2/s * 1.5) = 1/3 s
+    max_time = 5.0 * ureg.s
+
+    def _pint_run(max_time: Quantity, rate: Quantity, volume: Quantity) -> Quantity:
+        tau = 1.0 / (rate * volume)
+        time = 0.0 * ureg.s
+        while time < max_time:
+            time = cast("Quantity", time + tau)
+        return time
+
+    model = _WhileAccumulator(volume)
+    model.run(max_time, rate)  # warm-up
+    fast_result = model.run(max_time, rate)
+    pint_result = _pint_run(max_time, rate, volume)
+    assert fast_result.to(ureg.s).magnitude == pytest.approx(pint_result.to(ureg.s).magnitude)
+
+
 # Custom registry
 
 
@@ -294,3 +432,52 @@ def test_custom_registry_interop_with_other_quantities():
     # This would raise "Cannot operate with Quantity of different registries" before the fix.
     combined = result + 1.0 * my_ureg.second
     assert abs(combined.to_base_units().magnitude - 3.0) < 1e-12
+
+
+# NamedTuple params snapshot
+
+
+from typing import NamedTuple  # noqa: E402
+
+
+class _NTParams(NamedTuple):
+    alpha: Quantity
+    delta: Quantity
+
+
+class _ModelWithNamedTupleParams:
+    def __init__(self, params: _NTParams) -> None:
+        self.params = params
+
+    @unit_jit
+    def run(self, x: Quantity) -> Quantity:
+        # alpha and delta both in 1/s, x in mol/L: each term is mol/L/s
+        return cast("Quantity", self.params.alpha * x - self.params.delta * x)
+
+
+def test_namedtuple_params_result_correct():
+    """NamedTuple params with Quantity fields are snapshotted to SI floats at boundary."""
+    alpha = 2.0 / ureg.s
+    delta = 0.5 / ureg.s
+    x = 3.0 * ureg.mol / ureg.L
+    params = _NTParams(alpha=alpha, delta=delta)
+    model = _ModelWithNamedTupleParams(params)
+    model.run(x)  # warm-up
+    result = model.run(x)
+    expected = alpha * x - delta * x
+    assert isinstance(result, Quantity)
+    assert abs(result.to_base_units().magnitude - expected.to_base_units().magnitude) < 1e-12
+
+
+def test_namedtuple_params_jit_active():
+    """JIT is active for a method that accesses NamedTuple params."""
+    import unit_jit as _uj
+
+    alpha = 2.0 / ureg.s
+    delta = 0.5 / ureg.s
+    params = _NTParams(alpha=alpha, delta=delta)
+    model = _ModelWithNamedTupleParams(params)
+    model.run(3.0 * ureg.mol / ureg.L)
+    qualname = model.run.__qualname__
+    assert qualname in _uj._return_units
+    assert qualname not in _uj._jit_disabled

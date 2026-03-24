@@ -38,6 +38,7 @@ from unit_jit._inferrer import (  # noqa: E402
     _SENTINEL,
     _SNAP_KEY,
     _UNKNOWN,  # noqa: F401 (re-exported for tests)
+    _ListReturn,
     _strip_decorators,
     infer_return_units,
 )
@@ -119,11 +120,14 @@ def _snapshot(obj: Any) -> Any:
     """Eagerly convert all Quantity attrs to SI floats, once at boundary entry.
 
     Plain Quantity objects are converted directly to their SI magnitude.
+    NamedTuples are reconstructed with each field recursively snapshotted.
     For other objects, returns an instance of the same class (so method lookup
     still works) with a float-valued __dict__.
     """
     if isinstance(obj, Quantity):
         return obj.to_base_units().magnitude
+    if hasattr(type(obj), "_fields"):  # NamedTuple
+        return type(obj)._make(_snapshot(v) for v in obj)  # type: ignore[attr-defined]
     try:
         snap = object.__new__(type(obj))
         snap_dict: dict[str, Any] = {_SNAP_KEY: True}
@@ -135,6 +139,8 @@ def _snapshot(obj: Any) -> Any:
                 and not callable(val)
                 and not hasattr(val, "__array_interface__")
             ):
+                snap_dict[name] = _snapshot(val)
+            elif hasattr(type(val), "_fields"):  # nested NamedTuple
                 snap_dict[name] = _snapshot(val)
             else:
                 snap_dict[name] = val
@@ -148,6 +154,10 @@ def _to_fast(arg: Any) -> Any:
     """Convert a Quantity to an SI float; snapshot complex objects; leave the rest unchanged."""
     if isinstance(arg, Quantity):
         return arg.to_base_units().magnitude
+    if isinstance(arg, list):
+        return [_to_fast(el) for el in arg]
+    if isinstance(arg, tuple):
+        return tuple(_to_fast(el) for el in arg)
     if isinstance(arg, (int, float, bool, str, bytes, type(None))):
         return arg
     if hasattr(arg, "__array_interface__"):  # numpy arrays
@@ -158,9 +168,21 @@ def _to_fast(arg: Any) -> Any:
 
 
 def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry) -> Any:
-    """Wrap a float/array result back into a Quantity using cached SI units."""
+    """Wrap a float/array result back into a Quantity using cached SI units.
+
+    Handles nested structures: _ListReturn entries may themselves be _ListReturn,
+    enabling list[tuple[Quantity, ...]] and similar return types. Variable-length
+    lists are supported by repeating the last inferred element unit.
+    """
     if unit_info is None:
         return result
+    if isinstance(unit_info, _ListReturn):
+        n = len(result)
+        units = unit_info.units
+        if len(units) < n:
+            units = list(units) + [units[-1]] * (n - len(units))
+        wrapped = [_wrap(r, u, wrap_ureg) for r, u in zip(result, units)]
+        return wrapped if unit_info.kind == "list" else tuple(wrapped)
     if isinstance(unit_info, tuple):
         cls, units = unit_info
         if isinstance(units, list):
@@ -284,6 +306,9 @@ def unit_jit(
     if func is None:
         return lambda f: unit_jit(f, use_numba=use_numba, input_args=input_args)
 
+    if getattr(func, "__unit_jit_wrapped__", False):
+        return func  # idempotent: already wrapped, skip
+
     if isinstance(func, type):
         for name, method in func.__dict__.items():
             if inspect.isfunction(method) and not name.startswith("__"):
@@ -372,6 +397,8 @@ def unit_jit(
     wrapper.__module__ = func.__module__
     wrapper.__doc__ = func.__doc__
     wrapper.__annotations__ = func.__annotations__
+    wrapper.__unit_jit_wrapped__ = True
+    wrapper.__wrapped__ = func  # standard unwrap convention
     if input_args is not None:
         wrapper(*(1 * a if isinstance(a, Unit) else a for a in input_args))
     return wrapper  # type: ignore[return-value]
