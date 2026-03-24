@@ -20,7 +20,7 @@ def simulate_unitjit(t: Quantity) -> Quantity:
     mrna = 10.0 * ureg.nmol / ureg.L  # 10 nM initial concentration
     dt = 1.0 * ureg.s  # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)  # half-life 5 min (E. coli mRNA)
-    n = int((t / dt).to_base_units().magnitude)
+    n = int(t / dt)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
@@ -33,7 +33,7 @@ def simulate_numba(t: Quantity) -> Quantity:
     mrna = 10.0 * ureg.nmol / ureg.L  # 10 nM initial concentration
     dt = 1.0 * ureg.s  # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)  # half-life 5 min (E. coli mRNA)
-    n = int((t / dt).to_base_units().magnitude)
+    n = int(t / dt)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
@@ -45,7 +45,7 @@ def simulate_pint(t: Quantity) -> Quantity:
     mrna = 10.0 * ureg.nmol / ureg.L
     dt = 1.0 * ureg.s
     delta = np.log(2) / (5.0 * ureg.min)
-    n = int((t / dt).to_base_units().magnitude)
+    n = int(t / dt)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
