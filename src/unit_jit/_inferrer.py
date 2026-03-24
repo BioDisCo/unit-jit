@@ -732,9 +732,7 @@ def infer_return_units(
             return None
 
         reg = next((r for a in args if (r := _find_reg(a)) is not None), None)
-        reg = reg or next(
-            (r for v in kwargs.values() if (r := _find_reg(v)) is not None), None
-        )
+        reg = reg or next((r for v in kwargs.values() if (r := _find_reg(v)) is not None), None)
         reg = reg or next(iter(ureg_vars.values()), default_ureg)
         return inferred, reg
     except TypeError:

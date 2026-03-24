@@ -139,8 +139,20 @@ def test_init_subclass_result_correct():
     result = model.reaction_rates(state)
     assert isinstance(result, list)
     assert all(isinstance(r, Quantity) for r in result)
-    assert abs(result[0].to_base_units().magnitude - (0.5 / ureg.s * state[0]).to_base_units().magnitude) < 1e-12
-    assert abs(result[1].to_base_units().magnitude - (0.1 * ureg.mol / ureg.L / ureg.s).to_base_units().magnitude) < 1e-12
+    assert (
+        abs(
+            result[0].to_base_units().magnitude
+            - (0.5 / ureg.s * state[0]).to_base_units().magnitude
+        )
+        < 1e-12
+    )
+    assert (
+        abs(
+            result[1].to_base_units().magnitude
+            - (0.1 * ureg.mol / ureg.L / ureg.s).to_base_units().magnitude
+        )
+        < 1e-12
+    )
 
 
 def test_init_subclass_jit_active_after_first_call():
@@ -158,7 +170,10 @@ def test_init_subclass_fast_path_matches_pint():
     model = _UserModel(delta, gamma)
     model.reaction_rates(state)  # warm-up
     result = model.reaction_rates(state)
-    assert abs(result[0].to_base_units().magnitude - (delta * state[0]).to_base_units().magnitude) < 1e-12
+    assert (
+        abs(result[0].to_base_units().magnitude - (delta * state[0]).to_base_units().magnitude)
+        < 1e-12
+    )
     assert abs(result[1].to_base_units().magnitude - gamma.to_base_units().magnitude) < 1e-12
 
 

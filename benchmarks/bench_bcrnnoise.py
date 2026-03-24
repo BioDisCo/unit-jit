@@ -10,13 +10,13 @@ PlainSystem overrides gillespie to call the original undecorated version
 """
 
 import time
-import types
+from collections.abc import Sequence
 
 import numpy as np
-from collections.abc import Sequence
-from pint import Quantity
-from unit_jit import ureg
 from bcrnnoise import BCRN
+from pint import Quantity
+
+from unit_jit import ureg
 
 INIT_MRNA = 0.0 / ureg.femtoliter
 VOLUME = 1.0 * ureg.femtoliter
@@ -83,7 +83,9 @@ def main() -> None:
 
     print(f"\nGillespie ({N_REPS} reps, {N_WARMUP} warmup, TIME_HORIZON={TIME_HORIZON}):")
     t_plain = bench("plain pint", lambda: plain.simulate_markov_chain(seed=42), N_WARMUP, N_REPS)
-    t_jit = bench("@unit_jit gillespie", lambda: jit.simulate_markov_chain(seed=42), N_WARMUP, N_REPS)
+    t_jit = bench(
+        "@unit_jit gillespie", lambda: jit.simulate_markov_chain(seed=42), N_WARMUP, N_REPS
+    )
     print(f"  speedup: {t_plain / t_jit:.2f}x")
 
 

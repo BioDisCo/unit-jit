@@ -46,9 +46,7 @@ class PlainBirthDeath:
         """First-order degradation propensity."""
         return self.delta * count
 
-    def simulate_history(
-        self, seed: int, max_time: Quantity, counts_out: np.ndarray
-    ) -> Quantity:
+    def simulate_history(self, seed: int, max_time: Quantity, counts_out: np.ndarray) -> Quantity:
         """Run Gillespie and return the event times as a Quantity array."""
         rng = np.random.default_rng(seed)
         time_now = 0.0 * max_time
@@ -105,9 +103,7 @@ class FastBirthDeath:
         return self.delta * count
 
     @unit_jit
-    def simulate_history(
-        self, seed: int, max_time: Quantity, counts_out: np.ndarray
-    ) -> Quantity:
+    def simulate_history(self, seed: int, max_time: Quantity, counts_out: np.ndarray) -> Quantity:
         """Run Gillespie and return the event times as a Quantity array."""
         rng = np.random.default_rng(seed)
         time_now = 0.0 * max_time
@@ -144,6 +140,7 @@ class FastBirthDeath:
         counts = np.empty(max_events + 1, dtype=int)
         times = self.simulate_history(seed, max_time, counts)
         return times, counts[: len(times)]
+
 
 #
 # Numba needs one self-free hot kernel. Unlike the plain unit_jit variant, this
@@ -245,8 +242,7 @@ if __name__ == "__main__":
 
     print(f"plain Pint: {t_plain / REPEATS * 1e3:.2f} ms per call")
     print(
-        f"unit_jit:   {t_fast / REPEATS * 1e3:.2f} ms per call"
-        f"  ({t_plain / t_fast:.0f}x vs Pint)"
+        f"unit_jit:   {t_fast / REPEATS * 1e3:.2f} ms per call  ({t_plain / t_fast:.0f}x vs Pint)"
     )
     print(
         f"unit_jit + Numba: {t_numba / REPEATS * 1e3:.2f} ms per call"
