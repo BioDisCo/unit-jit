@@ -1,6 +1,6 @@
 # unit-jit
 
-We love explicit tracking of physical units in code, but do not want to pay the runtime overhead in hot loops. `unit-jit` solves this with a single decorator: write your functions against [Pint](https://pint.readthedocs.io) as usual, and let `unit-jit` strip the unit machinery at JIT compile time so subsequent calls run on plain floats.
+We love explicit tracking of physical units in code, but do not want to pay the runtime overhead in hot loops. `unit-jit` solves this with a single decorator: write your functions against [Pint](https://pint.readthedocs.io) as usual, and let `unit-jit` strip the unit machinery at JIT compile time so every call runs on plain floats.
 
 ```python
 from pint import Quantity
@@ -10,17 +10,17 @@ from unit_jit import unit_jit, ureg
 def velocity(d: Quantity, t: Quantity) -> Quantity:
     return d / t
 
-velocity(10 * ureg.m, 2 * ureg.s)   # warm-up (runs Pint)
+velocity(10 * ureg.m, 2 * ureg.s)   # first call: unit inference + fast
 velocity(10 * ureg.m, 2 * ureg.s)   # fast (pure float internally)
 velocity(10 * ureg.cm, 2 * ureg.s)  # fast and fine: same dimension, different unit
 velocity(10 * ureg.m, 2 * ureg.m)   # TypeError: wrong dimension for arg 1
 ```
 
-The first call runs the original Pint function to infer return units and cache argument dimensions. All subsequent calls convert arguments to SI floats at the boundary, run a rewritten pure-float version of the function, and wrap the result back into a `Quantity` with the cached units.
+On the first call, `unit-jit` abstract-interprets the function body with the input units, checks dimensional correctness across all branches, infers return units, and caches a CST-rewritten version that operates on raw floats. All subsequent calls convert arguments to SI floats at the boundary, run the rewritten pure-float version, and wrap the result back into a `Quantity` with the cached units.
 
 ## Benchmark
 
-Both functions below are identical in structure. `simulate_pint` runs with full Pint overhead on every call; `simulate_fast` pays that cost only on the first call and runs as plain floats thereafter.
+Both functions below are identical in structure. `simulate_pint` runs with full Pint overhead on every call; `simulate_fast` runs as plain floats on every call.
 
 ```python
 import time
@@ -56,7 +56,6 @@ def simulate_pint(t: Quantity) -> Quantity:
 
 
 T, repeats = 10 * ureg.min, 300
-simulate_fast(T)  # warm-up
 
 t0 = time.perf_counter()
 for _ in range(repeats): simulate_pint(T)
@@ -81,10 +80,10 @@ The speedup scales with loop length: the longer the loop, the more Pint overhead
 
 ## How it works
 
-1. **Module-level compilation**: on first call, all `@unit_jit` functions in the same module are rewritten together: `.magnitude`, `.to_base_units()`, and `cast("Quantity", x)` are stripped from the source.
+1. **Unit inference**: on the first call, all `@unit_jit` functions in the module are rewritten together. The function body is abstract-interpreted with the input units: dimensional errors (e.g. adding meters to seconds) are caught across all branches at this point, and return units are inferred. If source is unavailable, the function falls back to running as plain Pint on every call.
 2. **Eager snapshot**: Quantity attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is a plain dict lookup.
 3. **Fast zone**: a thread-local flag marks the outermost `@unit_jit` frame. Inner `@unit_jit` calls skip boundary conversion entirely.
-4. **Return wrapping**: the SI unit of the return value is inferred from the first call and used to wrap subsequent results back into `Quantity`. The registry is also captured from that first result, so results always belong to the same registry that produced them, whether that is `unit_jit.ureg` or a user-supplied one.
+4. **Return wrapping**: the SI unit of the return value is inferred on the first call and used to wrap subsequent results back into `Quantity`. The registry is also captured from that first call, so results always belong to the same registry that produced them, whether that is `unit_jit.ureg` or a user-supplied one.
 5. **Dimension guard**: argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
 
 The right entry point is the **outermost function that owns the hot loop**, not the leaf functions it calls.
@@ -108,32 +107,9 @@ uv sync --extra dev  # or: pip install -e ".[dev]"
 
 ## Usage
 
-### Skipping the warm-up
-
-By default the first call runs the original Pint function to infer what units the return value has. If that first call is expensive, declare the units upfront with `return_units` and it is skipped:
-
-```python
-# scalar return
-@unit_jit(return_units=ureg.m / ureg.s)
-def speed(d: Quantity, t: Quantity) -> Quantity:
-    return d / t
-
-# list return, all elements share the same unit
-@unit_jit(return_units=list[ureg.mol / ureg.L / ureg.s])
-def reaction_rates(self, state: list[Quantity]) -> list[Quantity]:
-    return [self.alpha, self.delta * state[0]]
-
-# list return, mixed units (one declaration per element)
-@unit_jit(return_units=[ureg.mol / ureg.L / ureg.s, ureg.dimensionless / ureg.s])
-def mixed_rates(self, state: list[Quantity]) -> list[Quantity]:
-    return [self.alpha, self.k * state[0]]
-```
-
-Both `Unit` and `Quantity` objects are accepted; only the unit is used, not the magnitude.
-
 ### Scalar loop
 
-The primary use case is a tight loop over scalars. `unit_jit` rewrites the function body so that all Pint calls disappear: `ureg.nmol / ureg.L` becomes the corresponding SI float, `.to_base_units()` is stripped, and arithmetic runs on plain floats. The result is wrapped back into a `Quantity` with the units inferred from the first call.
+The primary use case is a tight loop over scalars. `unit_jit` rewrites the function body so that all Pint calls disappear: `ureg.nmol / ureg.L` becomes the corresponding SI float, `.to_base_units()` is stripped, and arithmetic runs on plain floats. The result is wrapped back into a `Quantity` with the inferred units.
 
 ```python
 import numpy as np
@@ -167,8 +143,8 @@ def path_total(path: Quantity) -> Quantity:
     return np.sum(path)
 
 path = np.array([1.0, 2.0, 3.0]) * ureg.m
-path_total(path)   # warm-up
-path_total(path)   # fast; returns 6.0 m as Quantity
+path_total(path)   # first call: inference + fast; returns 6.0 m as Quantity
+path_total(path)   # fast
 ```
 
 ### Vectorized operations on Quantity arrays
@@ -186,8 +162,7 @@ def speeds(distances: Quantity, times: Quantity) -> Quantity:
 
 d = np.array([10.0, 20.0, 30.0]) * ureg.m
 t = np.array([2.0,  4.0,  5.0]) * ureg.s
-speeds(d, t)   # warm-up
-speeds(d, t)   # fast; returns [5., 5., 6.] m/s as Quantity
+speeds(d, t)   # first call: inference + fast; returns [5., 5., 6.] m/s as Quantity
 ```
 
 ### Class with Quantity attributes
@@ -229,50 +204,6 @@ class Model:
 
 `simulate` is the entry point: it owns the hot loop and is where boundary conversion happens. `rate` is called from within the fast zone, so it receives plain floats directly and its rewritten body runs without any Pint calls.
 
-### Owning the loop with `fast_zone`
-
-Sometimes you write the simulation loop yourself but call `@unit_jit`-decorated functions from a library inside it. Use `fast_zone` to declare the boundary explicitly: list the objects that cross it, pay the conversion cost once on entry, and work in pure floats throughout.
-
-```python
-from unit_jit import fast_zone, unit_jit, ureg
-from pint import Quantity
-
-@unit_jit
-class DecayModel:
-    def __init__(self, alpha: Quantity, delta: Quantity) -> None:
-        self.alpha = alpha   # Quantity attrs converted to SI floats at fast_zone entry
-        self.delta = delta
-
-    def rate(self, x: Quantity) -> Quantity:
-        return self.alpha - self.delta * x
-
-model = DecayModel(alpha=0.1 * ureg.mol / ureg.L / ureg.s, delta=0.01 / ureg.s)
-x0    = 5.0 * ureg.mol / ureg.L
-dt    = 0.1 * ureg.s
-
-x_si  = x0.to_base_units().magnitude   # strip units once before the loop
-dt_si = dt.to_base_units().magnitude
-
-model.rate(x0)  # warm-up: compiles the rewritten float version
-
-with fast_zone(model) as (fast_model,):
-    for _ in range(600):
-        x_si = x_si + fast_model.rate(x_si) * dt_si
-```
-
-`fast_zone` accepts any number of objects and yields their snapshotted proxies in the same order. Quantity attributes on each object are converted to SI floats on entry; passing the proxy into `@unit_jit` methods inside the block incurs no further conversion cost.
-
-On Apple M3 Pro (600 steps, 500 repetitions):
-
-```
-plain Pint:  33.01 ms per call
-fast_zone:    0.69 ms per call  (48x vs plain)
-```
-
-The large speedup here comes from the loop being entirely in SI floats: no Pint operations remain anywhere inside the block. This contrasts with cases where the surrounding loop code still uses Pint (e.g. stochastic simulations that reconstruct Quantities between steps), where the gain is more modest.
-
-`fast_zone` nests safely: if already inside a fast zone, entering another is a no-op and objects are returned unconverted.
-
 ### Custom registry
 
 You can use your own `UnitRegistry` instead of `unit_jit.ureg`. Results will be wrapped using whichever registry produced the first-call return value, so they interoperate naturally with the rest of your quantities.
@@ -288,8 +219,7 @@ def scale(x: Quantity, factor: float) -> Quantity:
     return x * factor
 
 x = 3.0 * my_ureg.meter
-scale(x, 2.0)           # warm-up
-result = scale(x, 2.0)  # result is a Quantity in my_ureg
+result = scale(x, 2.0)        # result is a Quantity in my_ureg
 result + 1.0 * my_ureg.meter  # works: same registry
 ```
 
@@ -316,7 +246,7 @@ def simulate(t: Quantity) -> Quantity:
         out[i] = mrna.to_base_units().magnitude
     return out * ureg.mol / ureg.m**3
 
-simulate(10 * ureg.min)  # trigger compilation
+simulate(10 * ureg.min)  # trigger inference and compilation
 print(get_rewritten_source(simulate))
 ```
 
@@ -337,7 +267,7 @@ def simulate(t: Quantity) -> Quantity:
 
 All `ureg` unit references are replaced by their SI float values (`ureg.nmol / ureg.L` becomes `1e-9 / 0.001`, `ureg.min` becomes `60.0`, `ureg.mol / ureg.m**3` becomes `1.0 / 1.0**3`), `.to_base_units().magnitude` is stripped, and the arithmetic is otherwise unchanged.
 
-Function `get_rewritten_source` shows only what runs inside the fast zone. The boundary is not shown: arguments arrive as plain SI floats (so `t` is a float in seconds, not a `Quantity`), and the raw return value is wrapped back into a `Quantity` by the runtime using the units inferred from the first call. The annotations in the rewritten source are kept as-is but no longer reflect the actual types in flight.
+`get_rewritten_source` shows only what runs inside the fast zone. The boundary is not shown: arguments arrive as plain SI floats (so `t` is a float in seconds, not a `Quantity`), and the raw return value is wrapped back into a `Quantity` by the runtime using the inferred units.
 
 ## Numba integration
 
@@ -360,12 +290,12 @@ def simulate(t: Quantity) -> Quantity:
         out[i] = mrna.to_base_units().magnitude
     return out * ureg.mol / ureg.m**3
 
-simulate(10 * ureg.min)  # 1st call: runs Pint, infers return units
+simulate(10 * ureg.min)  # 1st call: unit inference + compilation
 simulate(10 * ureg.min)  # 2nd call: triggers Numba compilation
 simulate(10 * ureg.min)  # 3rd call onwards: Numba-compiled float loop
 ```
 
-Two warm-up calls are needed: the first runs the original Pint function to infer return units (the same as plain `unit_jit`), and the second triggers Numba's own JIT compilation. From the third call on, the full pipeline runs at native speed.
+Two calls are needed before reaching full speed: the first runs unit inference and CST rewriting, and the second triggers Numba's own JIT compilation. From the third call on, the full pipeline runs at native speed.
 
 On the same mRNA decay benchmark (Apple M3 Pro, 600 steps, 300 repetitions):
 

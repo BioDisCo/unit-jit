@@ -5,8 +5,11 @@ first call to any of them. Pint Quantities are converted to SI floats at
 the outermost boundary; inner @unit_jit calls within the fast zone skip
 conversion entirely.
 
-The first call per entry point runs the original (Pint) function to infer
-return units; all subsequent calls use the rewritten float version.
+On the first call, unit inference runs abstract interpretation over the
+function's CST, propagating Pint units symbolically through all branches.
+Dimensional errors (e.g. adding meters to seconds) are caught at this
+point. If inference fails (source unavailable, parse error), the original
+function is marked as JIT-disabled and runs as plain Pint on every call.
 
 Rewrites applied inside the fast zone:
   - x.magnitude         -> x
@@ -24,14 +27,20 @@ import inspect
 import logging
 import textwrap
 import threading
-import types
 from collections import defaultdict
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from typing import Any, overload
 
 import libcst as cst
-from pint import Quantity, Unit, UnitRegistry
+from pint import Quantity, UnitRegistry
+
+from unit_jit._inferrer import (  # noqa: E402
+    _SENTINEL,
+    _SNAP_KEY,
+    _UNKNOWN,  # noqa: F401 (re-exported for tests)
+    _strip_decorators,
+    infer_return_units,
+)
 
 ureg = UnitRegistry()
 _log = logging.getLogger(__name__)
@@ -44,46 +53,11 @@ _return_units: dict[str, Any] = {}
 _arg_dims: dict[str, tuple[list[Any], dict[str, Any]]] = {}  # qualname -> (positional, keyword)
 _use_numba: set[str] = set()  # qualnames for which numba.jit should be applied
 _return_registry: dict[str, UnitRegistry] = {}  # qualname -> registry used to wrap results
+_jit_disabled: set[str] = set()  # qualnames where inference failed: always run original
 
 
 def _in_fast_zone() -> bool:
     return getattr(_fast_zone, "active", False)
-
-
-@contextmanager
-def fast_zone(*objects: Any) -> Iterator[tuple[Any, ...]]:
-    """Enter the fast zone manually for a block of code.
-
-    Any @unit_jit-decorated function called within this block skips boundary
-    conversion and returns raw SI float values. Use this when you own the loop
-    but not the functions called inside it: declare which objects cross the
-    boundary, pay the conversion cost once on entry, and work in floats
-    throughout.
-
-    Nests safely: if already inside a fast zone, this is a no-op and objects
-    are returned unconverted.
-
-    Args:
-        *objects: objects whose Quantity attributes should be converted to SI
-            floats on entry. The converted proxies are yielded, one per object.
-
-    Example:
-        with fast_zone(self) as (fast_self,):
-            while ...:
-                rates_si = fast_self.reaction_rates(conc_si)  # raw floats
-
-        with fast_zone(self, params) as (fast_self, fast_params):
-            ...
-    """
-    already_active = _in_fast_zone()
-    snapped = tuple(objects if already_active else (_snapshot(o) for o in objects))
-    if not already_active:
-        _fast_zone.active = True
-    try:
-        yield snapped
-    finally:
-        if not already_active:
-            _fast_zone.active = False
 
 
 # CST transformer
@@ -140,34 +114,16 @@ class _QuantityStripper(cst.CSTTransformer):
 
 # Boundary helpers
 
-_SNAP_KEY = "__unit_jit_snap__"
-
-
-def snapshot(obj: Any) -> Any:
-    """Convert all Quantity attributes of obj to SI floats, returning a fast proxy.
-
-    Use this before a fast_zone block to pay the conversion cost once rather than
-    on every decorated call inside the loop:
-
-        fast_self = snapshot(self)
-        with fast_zone():
-            while ...:
-                rates = fast_self.reaction_rates(state_si)
-
-    The returned proxy is an instance of the same class (method lookup still works)
-    but with float-valued attributes. Passing it repeatedly into @unit_jit functions
-    inside the fast zone incurs no further conversion overhead.
-    """
-    return _snapshot(obj)
-
 
 def _snapshot(obj: Any) -> Any:
     """Eagerly convert all Quantity attrs to SI floats, once at boundary entry.
 
-    Returns an instance of the same class (so method lookup still works) but
-    with a float-valued __dict__. Subsequent attribute access inside the fast
-    zone is a plain dict lookup, no Pint calls.
+    Plain Quantity objects are converted directly to their SI magnitude.
+    For other objects, returns an instance of the same class (so method lookup
+    still works) with a float-valued __dict__.
     """
+    if isinstance(obj, Quantity):
+        return obj.to_base_units().magnitude
     try:
         snap = object.__new__(type(obj))
         snap_dict: dict[str, Any] = {_SNAP_KEY: True}
@@ -201,50 +157,6 @@ def _to_fast(arg: Any) -> Any:
     return _snapshot(arg)
 
 
-def _infer_units(result: Any) -> tuple[Any, UnitRegistry | None]:
-    """Extract SI unit structure and the source registry from a Pint result."""
-    if isinstance(result, Quantity):
-        return result.to_base_units().units, result._REGISTRY  # noqa: SLF001
-    if isinstance(result, (list, tuple)):
-        units = [r.to_base_units().units if isinstance(r, Quantity) else None for r in result]
-        reg = next((r._REGISTRY for r in result if isinstance(r, Quantity)), None)  # noqa: SLF001
-        return (type(result), units), reg
-    return None, None
-
-
-def _parse_return_units(return_units: Any) -> tuple[Any, UnitRegistry | None]:
-    """Convert a user-supplied return_units declaration to internal (unit_info, registry) format.
-
-    Accepts Quantity or Unit objects (or lists/tuples thereof):
-      - a single Quantity or Unit  -> scalar unit_info
-      - a list/tuple thereof       -> (container_type, [units]) unit_info
-    """
-
-    def _to_unit_and_reg(r: Any) -> tuple[Any, UnitRegistry | None]:
-        if isinstance(r, Quantity):
-            return r.to_base_units().units, r._REGISTRY  # noqa: SLF001
-        if isinstance(r, Unit):
-            return (1 * r).to_base_units().units, r._REGISTRY  # noqa: SLF001
-        return None, None
-
-    if isinstance(return_units, (Quantity, Unit)):
-        unit, reg = _to_unit_and_reg(return_units)
-        return unit, reg
-    if isinstance(return_units, types.GenericAlias):
-        # list[ureg.mol/ureg.L/ureg.s]: one unit applied to all elements
-        unit, reg = _to_unit_and_reg(return_units.__args__[0])
-        return (return_units.__origin__, unit), reg
-    if isinstance(return_units, (list, tuple)):
-        units, reg = [], None
-        for r in return_units:
-            u, r_ = _to_unit_and_reg(r)
-            units.append(u)
-            if reg is None:
-                reg = r_
-        return (type(return_units), units), reg
-    return None, None
-
-
 def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry) -> Any:
     """Wrap a float/array result back into a Quantity using cached SI units."""
     if unit_info is None:
@@ -260,14 +172,6 @@ def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry) -> Any:
 
 
 # Compilation
-
-
-def _strip_decorators(src: str) -> str:
-    """Remove leading decorator lines from a function's source before rewriting."""
-    lines = src.splitlines()
-    while lines and lines[0].lstrip().startswith("@"):
-        lines.pop(0)
-    return "\n".join(lines)
 
 
 def _compile_module(module_name: str) -> None:
@@ -323,27 +227,24 @@ def get_rewritten_source(func: Callable[..., Any]) -> str:
 
 
 @overload
-def unit_jit(func: type, *, use_numba: bool = ..., return_units: Any = ...) -> type: ...
+def unit_jit(func: type, *, use_numba: bool = ...) -> type: ...
 
 
 @overload
-def unit_jit[**P, R](
-    func: Callable[P, R], *, use_numba: bool = ..., return_units: Any = ...
-) -> Callable[P, R]: ...
+def unit_jit[**P, R](func: Callable[P, R], *, use_numba: bool = ...) -> Callable[P, R]: ...
 
 
 @overload
-def unit_jit(
-    func: None = ..., *, use_numba: bool = ..., return_units: Any = ...
-) -> Callable[[Any], Any]: ...
+def unit_jit(func: None = ..., *, use_numba: bool = ...) -> Callable[[Any], Any]: ...
 
 
-def unit_jit(func: Any = None, *, use_numba: bool = False, return_units: Any = None) -> Any:
+def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
     """JIT decorator for functions and classes: strips Pint overhead, runs fast after first call.
 
     When applied to a function:
-    - First call: runs original function (Pint), infers return units, caches them.
-      Skipped entirely if return_units is provided.
+    - First call: abstract-interprets the function body with input units to check
+      dimensional correctness and infer return units. Falls back to running the
+      original Pint function if source is unavailable.
     - Subsequent calls: converts args to SI floats, runs rewritten version,
       wraps result back into Quantity with cached units.
     - If called from within the fast zone (inner call): skips boundary
@@ -357,21 +258,14 @@ def unit_jit(func: Any = None, *, use_numba: bool = False, return_units: Any = N
             float function. Requires numba to be installed. Best suited for
             functions whose rewritten body is pure float/NumPy with no calls
             to other @unit_jit-decorated functions.
-        return_units: declare return units upfront to skip the warm-up call.
-            Pass a Quantity for scalar returns or a list of Quantities for list
-            returns. The magnitude is ignored; only the unit is used.
-            Example: return_units=ureg.mol/ureg.L/ureg.s
-            Example: return_units=[ureg.mol/ureg.L/ureg.s, ureg.mol/ureg.L/ureg.s]
     """
     if func is None:
-        return lambda f: unit_jit(f, use_numba=use_numba, return_units=return_units)
+        return lambda f: unit_jit(f, use_numba=use_numba)
 
     if isinstance(func, type):
         for name, method in func.__dict__.items():
             if inspect.isfunction(method) and not name.startswith("__"):
-                setattr(
-                    func, name, unit_jit(method, use_numba=use_numba, return_units=return_units)
-                )
+                setattr(func, name, unit_jit(method, use_numba=use_numba))
         return func
 
     if use_numba:
@@ -379,11 +273,6 @@ def unit_jit(func: Any = None, *, use_numba: bool = False, return_units: Any = N
 
     module_name = func.__module__
     _registry[module_name].append(func)
-
-    if return_units is not None:
-        unit_info, reg = _parse_return_units(return_units)
-        _return_units[func.__qualname__] = unit_info
-        _return_registry[func.__qualname__] = reg if reg is not None else ureg
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if module_name not in _compiled:
@@ -399,12 +288,12 @@ def unit_jit(func: Any = None, *, use_numba: bool = False, return_units: Any = N
             fast_kwargs = {k: _to_fast(v) for k, v in kwargs.items()}
             return fast_func(*fast_args, **fast_kwargs)
 
-        # Entry point. First call: run original to infer return units + cache arg dimensions.
+        # Functions where inference failed always run as original Pint (no JIT).
+        if qualname in _jit_disabled:
+            return func(*args, **kwargs)
+
+        # Entry point: infer units on first call via abstract interpretation.
         if qualname not in _return_units:
-            result = func(*args, **kwargs)
-            unit_info, reg = _infer_units(result)
-            _return_units[qualname] = unit_info
-            _return_registry[qualname] = reg if reg is not None else ureg
             _arg_dims[qualname] = (
                 [a.dimensionality if isinstance(a, Quantity) else None for a in args],
                 {
@@ -412,10 +301,26 @@ def unit_jit(func: Any = None, *, use_numba: bool = False, return_units: Any = N
                     for k, v in kwargs.items()
                 },
             )
-            return result
+            inferred_info, inferred_reg = infer_return_units(
+                func, args, kwargs, _return_units, ureg
+            )
+            if inferred_info is not _SENTINEL:
+                _return_units[qualname] = inferred_info
+                _return_registry[qualname] = inferred_reg if inferred_reg is not None else ureg
+                # Fall through to fast path below.
+            else:
+                # Inference failed: disable JIT for this function permanently.
+                _jit_disabled.add(qualname)
+                _log.warning(
+                    "'%s': unit inference failed; running as plain Pint on every call "
+                    "(no JIT speedup). Enable debug logging for details.",
+                    func.__qualname__,
+                )
+                return func(*args, **kwargs)
 
-        # Subsequent calls: check dimensions, convert, run fast version, wrap result.
-        # Skipped when return_units is declared (no warm-up call to populate _arg_dims).
+        # Subsequent calls (and first call when inference succeeded): check
+        # dimensions, convert, run fast version, wrap result.
+        # Dimension check: skipped when inference failed to record arg dims (no _arg_dims entry).
         if qualname in _arg_dims:
             pos_dims, kw_dims = _arg_dims[qualname]
             for i, (arg, dim) in enumerate(zip(args, pos_dims)):

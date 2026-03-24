@@ -33,10 +33,8 @@ class Params:
     dt: Quantity  # timestep            [s]
 
 
-# ── Module-level helper ────────────────────────────────────────────────────────
-# Compiled together with Model.drift and Model.noise on first call.
-# When invoked from Model.noise (already inside the fast zone), _in_fast_zone()
-# is True so boundary conversion is skipped — args are already SI floats.
+# Module-level helper, compiled together with Model.drift and Model.noise on first call.
+# When invoked from Model.noise, boundary conversion is skipped: args are already SI floats.
 
 
 @unit_jit
@@ -91,10 +89,7 @@ if __name__ == "__main__":
     N = 500
     repeats = 300
 
-    # Warm-up: first call runs the original Pint version to infer return units.
-    # Subsequent calls use the rewritten float version.
-    model.simulate(N)
-    print()
+    model.simulate(N)  # first call: unit inference + compilation
 
     t0 = time.perf_counter()
     for _ in range(repeats):

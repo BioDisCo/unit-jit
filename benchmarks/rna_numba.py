@@ -56,12 +56,12 @@ def simulate_pint(t: Quantity) -> Quantity:
 if __name__ == "__main__":
     T, repeats = 10 * ureg.min, 300
 
-    simulate_unitjit(T)  # warm-up: unit_jit compilation (Pint first call)
-    simulate_unitjit(T)  # warm-up: unit_jit fast path
-    simulate_numba(T)  # warm-up: Pint first call
-    simulate_numba(T)  # warm-up: triggers Numba compilation
-    simulate_numba(T)  # warm-up: Numba fast path
-    simulate_pint(T)  # warm-up
+    # unit_jit: first call does unit inference + CST rewriting; already fast after that.
+    simulate_unitjit(T)
+    # unit_jit + Numba: first call does unit inference + CST rewriting;
+    # second call triggers Numba compilation; fast from the third call on.
+    simulate_numba(T)
+    simulate_numba(T)
 
     t0 = time.perf_counter()
     for _ in range(repeats):
