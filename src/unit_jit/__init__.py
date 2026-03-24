@@ -227,18 +227,35 @@ def get_rewritten_source(func: Callable[..., Any]) -> str:
 
 
 @overload
-def unit_jit(func: type, *, use_numba: bool = ...) -> type: ...
+def unit_jit(
+    func: type, *, use_numba: bool = ..., input_args: tuple[Any, ...] | None = ...
+) -> type: ...
 
 
 @overload
-def unit_jit[**P, R](func: Callable[P, R], *, use_numba: bool = ...) -> Callable[P, R]: ...
+def unit_jit[**P, R](
+    func: Callable[P, R],
+    *,
+    use_numba: bool = ...,
+    input_args: tuple[Any, ...] | None = ...,
+) -> Callable[P, R]: ...
 
 
 @overload
-def unit_jit(func: None = ..., *, use_numba: bool = ...) -> Callable[[Any], Any]: ...
+def unit_jit(
+    func: None = ...,
+    *,
+    use_numba: bool = ...,
+    input_args: tuple[Any, ...] | None = ...,
+) -> Callable[[Any], Any]: ...
 
 
-def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
+def unit_jit(
+    func: Any = None,
+    *,
+    use_numba: bool = False,
+    input_args: tuple[Any, ...] | None = None,
+) -> Any:
     """JIT decorator for functions and classes: strips Pint overhead, runs fast after first call.
 
     When applied to a function:
@@ -258,9 +275,14 @@ def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
             float function. Requires numba to be installed. Best suited for
             functions whose rewritten body is pure float/NumPy with no calls
             to other @unit_jit-decorated functions.
+        input_args: optional tuple of example arguments used to trigger unit
+            inference immediately at decoration time. Equivalent to calling the
+            function once with these arguments right after decoration. Note: only
+            functions registered before this decorator runs are compiled together;
+            use the module-level compile() if that ordering matters.
     """
     if func is None:
-        return lambda f: unit_jit(f, use_numba=use_numba)
+        return lambda f: unit_jit(f, use_numba=use_numba, input_args=input_args)
 
     if isinstance(func, type):
         for name, method in func.__dict__.items():
@@ -350,4 +372,6 @@ def unit_jit(func: Any = None, *, use_numba: bool = False) -> Any:
     wrapper.__module__ = func.__module__
     wrapper.__doc__ = func.__doc__
     wrapper.__annotations__ = func.__annotations__
+    if input_args is not None:
+        wrapper(*input_args)
     return wrapper  # type: ignore[return-value]

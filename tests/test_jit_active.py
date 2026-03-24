@@ -80,6 +80,28 @@ def test_class_method_jit_active():
     assert _jit_active(m.rate)
 
 
+# input_args: inference triggered at decoration time
+
+
+def test_input_args_jit_active_before_explicit_call():
+    @unit_jit(input_args=(10 * ureg.m, 2 * ureg.s))
+    def _input_args_fn(d: Quantity, t: Quantity) -> Quantity:
+        return d / t
+
+    # No explicit call: inference ran during decoration via input_args.
+    assert _jit_active(_input_args_fn)
+
+
+def test_input_args_result_correct():
+    @unit_jit(input_args=(10 * ureg.m, 2 * ureg.s))
+    def _input_args_result(d: Quantity, t: Quantity) -> Quantity:
+        return d / t
+
+    result = _input_args_result(6 * ureg.m, 3 * ureg.s)
+    assert isinstance(result, Quantity)
+    assert abs(result.to_base_units().magnitude - 2.0) < 1e-12
+
+
 # JIT disabled when inference fails (source not inspectable)
 
 
