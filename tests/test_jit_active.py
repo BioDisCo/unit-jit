@@ -1,0 +1,103 @@
+"""Verify that JIT speedup conditions are met after first call.
+
+These tests check the internal state to confirm that:
+- unit inference succeeded (return units cached, JIT enabled), or
+- inference correctly failed and the function is marked as JIT-disabled.
+"""
+
+import unit_jit as _uj
+from pint import Quantity
+
+from unit_jit import get_rewritten_source, unit_jit, ureg
+
+
+def _jit_active(func: object) -> bool:
+    """Return True if JIT is active for func (inference succeeded, fast path used)."""
+    qualname = getattr(func, "__qualname__", None)
+    return (
+        qualname is not None
+        and qualname in _uj._return_units
+        and qualname not in _uj._jit_disabled
+    )
+
+
+def _jit_disabled(func: object) -> bool:
+    """Return True if JIT was disabled for func (inference failed)."""
+    qualname = getattr(func, "__qualname__", None)
+    return qualname is not None and qualname in _uj._jit_disabled
+
+
+# Basic scalar function
+
+
+@unit_jit
+def _scalar(d: Quantity, t: Quantity) -> Quantity:
+    return d / t
+
+
+def test_scalar_jit_active():
+    _scalar(10 * ureg.m, 2 * ureg.s)
+    assert _jit_active(_scalar)
+
+
+def test_scalar_module_compiled():
+    _scalar(10 * ureg.m, 2 * ureg.s)
+    assert _scalar.__module__ in _uj._compiled
+
+
+def test_scalar_source_rewritten():
+    _scalar(10 * ureg.m, 2 * ureg.s)
+    # get_rewritten_source raises if not compiled; result differs from original
+    src = get_rewritten_source(_scalar)
+    assert src is not None
+
+
+# Function returning dimensionless (None unit_info) is still JIT-active
+
+
+@unit_jit
+def _dimensionless(x: Quantity) -> float:
+    return x.to_base_units().magnitude
+
+
+def test_dimensionless_jit_active():
+    _dimensionless(3 * ureg.m)
+    assert _jit_active(_dimensionless)
+
+
+# Class methods
+
+
+@unit_jit
+class _JitActiveModel:
+    def rate(self, x: Quantity) -> Quantity:
+        return x * 2.0
+
+
+def test_class_method_jit_active():
+    m = _JitActiveModel()
+    m.rate(1 * ureg.m)
+    assert _jit_active(m.rate)
+
+
+# JIT disabled when inference fails (source not inspectable)
+
+
+def test_jit_disabled_on_inference_failure(caplog):
+    import logging
+
+    # Build a function whose source cannot be retrieved by inspect.getsource.
+    globs: dict = {}
+    exec(  # noqa: S102
+        "from unit_jit import unit_jit, ureg\n"
+        "from pint import Quantity\n"
+        "@unit_jit\n"
+        "def _no_src(x: Quantity) -> Quantity:\n"
+        "    return x * 2.0\n",
+        globs,
+    )
+    f = globs["_no_src"]
+    with caplog.at_level(logging.WARNING, logger="unit_jit"):
+        f(1 * ureg.m)
+    assert _jit_disabled(f)
+    assert any("unit inference failed" in r.message for r in caplog.records)
