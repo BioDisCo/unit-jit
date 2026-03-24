@@ -38,6 +38,27 @@ def _div_kw(d: Quantity, *, t: Quantity) -> Quantity:
     return cast("Quantity", d / t)
 
 
+@unit_jit
+def _add_matching_constant(d: Quantity) -> Quantity:
+    result = d + 1 * ureg.m  # constant added in the middle of the body
+    return result
+
+
+@unit_jit
+def _mul_constant(d: Quantity) -> Quantity:
+    result = d * (ureg.m * 2)  # constant multiplied in the middle of the body
+    return result
+
+
+@unit_jit
+def _add_constant_in_branch(d: Quantity, flag: bool) -> Quantity:
+    if flag:
+        result = d + 1 * ureg.m  # [length] + [length]
+    else:
+        result = d + 2 * ureg.m  # [length] + [length]
+    return result
+
+
 @dataclass
 class _Params:
     alpha: Quantity
@@ -118,6 +139,68 @@ def test_kwarg_dimension_mismatch_raises():
     _div_kw(10 * ureg.m, t=2 * ureg.s)  # warm-up
     with pytest.raises(TypeError, match="dimensions"):
         _div_kw(10 * ureg.m, t=2 * ureg.m)  # t is [length], expected [time]
+
+
+def test_body_add_matching_constant():
+    """Adding a same-dimension constant in the body succeeds on first call."""
+    result = _add_matching_constant(5 * ureg.m)
+    assert isinstance(result, Quantity)
+    expected = (6 * ureg.m).to_base_units().magnitude
+    assert abs(result.to_base_units().magnitude - expected) < 1e-12
+
+
+def test_body_add_mismatched_constant_raises():
+    """Adding a constant with wrong dimension raises TypeError on the first call (inferrer)."""
+
+    @unit_jit
+    def _bad_add(d: Quantity, t: Quantity) -> Quantity:
+        return cast("Quantity", d / t + 1 * ureg.m)  # [velocity] + [length]
+
+    with pytest.raises(TypeError):
+        _bad_add(10 * ureg.m, 2 * ureg.s)
+
+
+def test_body_mul_matching_constant():
+    """Multiplying by a unit constant in the body succeeds on first call."""
+    result = _mul_constant(3 * ureg.m)
+    assert isinstance(result, Quantity)
+    expected = (3 * ureg.m * 2 * ureg.m).to_base_units().magnitude
+    assert abs(result.to_base_units().magnitude - expected) < 1e-12
+
+
+def test_body_mul_then_add_mismatched_raises():
+    """Multiplying by a unit constant then adding the original (wrong dim) raises TypeError on first call."""
+
+    @unit_jit
+    def _bad_mul_add(d: Quantity) -> Quantity:
+        return cast("Quantity", d * (2 * ureg.m) + d)  # [length^2] + [length]
+
+    with pytest.raises(TypeError):
+        _bad_mul_add(3 * ureg.m)
+
+
+def test_body_if_branch_matching_constant():
+    """Adding a matching constant in both if/else branches succeeds on first call."""
+    result = _add_constant_in_branch(5 * ureg.m, flag=True)
+    assert isinstance(result, Quantity)
+    assert abs(result.to_base_units().magnitude - 6.0) < 1e-12
+    result2 = _add_constant_in_branch(5 * ureg.m, flag=False)
+    assert abs(result2.to_base_units().magnitude - 7.0) < 1e-12
+
+
+def test_body_if_branch_mismatched_constant_raises():
+    """A mismatched constant in one branch raises TypeError on the first call (inferrer checks all branches)."""
+
+    @unit_jit
+    def _bad_branch(d: Quantity, t: Quantity, flag: bool) -> Quantity:
+        if flag:
+            result = d / t + 1 * ureg.m  # [velocity] + [length]
+        else:
+            result = d / t
+        return result
+
+    with pytest.raises(TypeError):
+        _bad_branch(10 * ureg.m, 2 * ureg.s, True)
 
 
 # Class with snapshot
