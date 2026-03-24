@@ -35,7 +35,7 @@ def simulate_fast(t: Quantity) -> Quantity:
     mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
     dt    =  1.0 * ureg.s                    # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
-    n = int((t / dt).to_base_units().magnitude)
+    n = int(t / dt)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
@@ -47,7 +47,7 @@ def simulate_pint(t: Quantity) -> Quantity:
     mrna  = 10.0 * ureg.nmol / ureg.L
     dt    =  1.0 * ureg.s
     delta = np.log(2) / (5.0 * ureg.min)
-    n = int((t / dt).to_base_units().magnitude)
+    n = int(t / dt)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
@@ -83,7 +83,7 @@ The speedup scales with loop length: the longer the loop, the more Pint overhead
 1. **Unit inference**: on the first call, all `@unit_jit` functions in the module are rewritten together. The function body is abstract-interpreted with the input units: dimensional errors (e.g. adding meters to seconds) are caught across all branches at this point, and return units are inferred. If source is unavailable, the function falls back to running as plain Pint on every call.
 2. **Eager snapshot**: Quantity attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is a plain dict lookup.
 3. **Fast zone**: a thread-local flag marks the outermost `@unit_jit` frame. Inner `@unit_jit` calls skip boundary conversion entirely.
-4. **Return wrapping**: the SI unit of the return value is inferred on the first call and used to wrap subsequent results back into `Quantity`. The registry is also captured from that first call, so results always belong to the same registry that produced them, whether that is `unit_jit.ureg` or a user-supplied one.
+4. **Return wrapping**: the SI unit of the return value is determined by abstract interpretation and cached. The registry is captured from the first call's arguments, so results always belong to the same registry that produced them, whether that is `unit_jit.ureg` or a user-supplied one.
 5. **Dimension guard**: argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
 
 The right entry point is the **outermost function that owns the hot loop**, not the leaf functions it calls.
@@ -121,7 +121,7 @@ def simulate(t: Quantity) -> Quantity:
     mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
     dt    =  1.0 * ureg.s                     # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
-    n = int((t / dt).to_base_units().magnitude)
+    n = int(t / dt)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
@@ -169,7 +169,7 @@ speeds(d, t)   # first call: inference + fast; returns [5., 5., 6.] m/s as Quant
 
 `unit_jit` can be applied to individual methods or to the whole class at once. When applied to a class, it decorates all non-dunder methods automatically.
 
-`unit_jit` snapshots all `Quantity` attributes on `self` once at the outermost boundary entry, replacing them with SI floats. Inner methods called from within the fast zone skip boundary conversion entirely, so there is no double-conversion overhead.
+`unit_jit` snapshots all `Quantity` attributes on `self` once at the outermost boundary entry, replacing them with SI floats. Inner methods skip boundary conversion entirely, so there is no double-conversion overhead.
 
 ```python
 from dataclasses import dataclass
@@ -202,11 +202,11 @@ class Model:
         return out * ureg.mol / ureg.m**3
 ```
 
-`simulate` is the entry point: it owns the hot loop and is where boundary conversion happens. `rate` is called from within the fast zone, so it receives plain floats directly and its rewritten body runs without any Pint calls.
+`simulate` is the entry point: it owns the hot loop and is where boundary conversion happens. `rate` is an inner call, so it receives plain floats directly and its rewritten body runs without any Pint calls.
 
 ### Custom registry
 
-You can use your own `UnitRegistry` instead of `unit_jit.ureg`. Results will be wrapped using whichever registry produced the first-call return value, so they interoperate naturally with the rest of your quantities.
+You can use your own `UnitRegistry` instead of `unit_jit.ureg`. The registry is captured from the first call's input arguments, so results are wrapped in the same registry and interoperate naturally with the rest of your quantities.
 
 ```python
 from pint import Quantity, UnitRegistry
@@ -227,7 +227,7 @@ The module-level `ureg` exported by `unit_jit` remains available as a convenienc
 
 ## Debugging
 
-To inspect what code actually runs in the fast zone, use `get_rewritten_source`. It triggers compilation if needed and returns the rewritten function source as a string.
+To inspect what code actually runs after rewriting, use `get_rewritten_source`. It triggers compilation if needed and returns the rewritten function source as a string.
 
 ```python
 import numpy as np
@@ -239,7 +239,7 @@ def simulate(t: Quantity) -> Quantity:
     mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
     dt    =  1.0 * ureg.s                    # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
-    n = int((t / dt).to_base_units().magnitude)
+    n = int(t / dt)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
@@ -257,7 +257,7 @@ def simulate(t: Quantity) -> Quantity:
     mrna  = 10.0 * 1e-09 / 0.0010000000000000002
     dt    =  1.0 * 1.0
     delta = np.log(2) / (5.0 * 60.0)
-    n = int((t / dt))
+    n = int(t / dt)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
@@ -267,7 +267,7 @@ def simulate(t: Quantity) -> Quantity:
 
 All `ureg` unit references are replaced by their SI float values (`ureg.nmol / ureg.L` becomes `1e-9 / 0.001`, `ureg.min` becomes `60.0`, `ureg.mol / ureg.m**3` becomes `1.0 / 1.0**3`), `.to_base_units().magnitude` is stripped, and the arithmetic is otherwise unchanged.
 
-`get_rewritten_source` shows only what runs inside the fast zone. The boundary is not shown: arguments arrive as plain SI floats (so `t` is a float in seconds, not a `Quantity`), and the raw return value is wrapped back into a `Quantity` by the runtime using the inferred units.
+`get_rewritten_source` shows only what runs in the rewritten version. The boundary is not shown: arguments arrive as plain SI floats (so `t` is a float in seconds, not a `Quantity`), and the raw return value is wrapped back into a `Quantity` by the runtime using the inferred units.
 
 ## Numba integration
 
@@ -283,7 +283,7 @@ def simulate(t: Quantity) -> Quantity:
     mrna  = 10.0 * ureg.nmol / ureg.L        # 10 nM initial concentration
     dt    =  1.0 * ureg.s                     # 1 s timestep
     delta = np.log(2) / (5.0 * ureg.min)     # half-life 5 min (E. coli mRNA)
-    n = int((t / dt).to_base_units().magnitude)
+    n = int(t / dt)
     out = np.empty(n)
     for i in range(n):
         mrna = mrna - delta * mrna * dt
