@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "unit-jit"
-version = "0.3.0"
+version = "0.4.0"
 description = "JIT unit-stripping decorator: write Pint-annotated code, run at float speed"
 authors = [{ name = "Matthias Függer" }]
 readme = "README.md"
@@ -13,10 +13,10 @@ license = { text = "Apache-2.0" }
 dependencies = [
     "pint>=0.24",
     "libcst>=1.4",
-    "numba>=0.64.0",
 ]
 
 [project.optional-dependencies]
+numba = ["numba>=0.64.0"]
 dev = [
     "pytest>=8.0",
     "numpy>=1.26",
