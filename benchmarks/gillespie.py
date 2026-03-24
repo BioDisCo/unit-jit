@@ -1,8 +1,9 @@
-"""Benchmark: unit_jit vs plain Pint for a Gillespie birth-death loop.
+"""Benchmark: plain Pint vs unit_jit vs unit_jit + Numba for Gillespie.
 
 This example keeps the Gillespie loop written with Pint semantics. `unit_jit`
 removes the unit overhead after the first call while preserving the same code
-structure.
+structure. The Numba variant shows the extra constraint for `use_numba=True`:
+the hot loop should live in one decorated method without nested decorated calls.
 
 The public API returns the full history as:
 
@@ -14,7 +15,6 @@ Run with:
     python benchmarks/gillespie.py
 """
 
-import math
 import time
 
 import numpy as np
@@ -47,9 +47,10 @@ class PlainBirthDeath:
         return self.delta * count
 
     def simulate_history(
-        self, rng: np.random.Generator, max_time: Quantity, counts_out: np.ndarray
+        self, seed: int, max_time: Quantity, counts_out: np.ndarray
     ) -> Quantity:
         """Run Gillespie and return the event times as a Quantity array."""
+        rng = np.random.default_rng(seed)
         time_now = 0.0 * max_time
         count = self.init_count
         time_history_mag = np.empty(len(counts_out))
@@ -65,7 +66,7 @@ class PlainBirthDeath:
                 break
 
             r1, r2 = rng.random(2)
-            time_now += math.log(1.0 / r1) / total
+            time_now += np.log(1.0 / r1) / total
 
             if r2 * total.magnitude < birth.magnitude:
                 count += 1
@@ -79,10 +80,10 @@ class PlainBirthDeath:
         return time_history_mag[:n_events] * ureg.s
 
     def simulate(
-        self, rng: np.random.Generator, max_time: Quantity, max_events: int = MAX_EVENTS
+        self, seed: int, max_time: Quantity, max_events: int = MAX_EVENTS
     ) -> tuple[Quantity, np.ndarray]:
         counts = np.empty(max_events + 1, dtype=int)
-        times = self.simulate_history(rng, max_time, counts)
+        times = self.simulate_history(seed, max_time, counts)
         return times, counts[: len(times)]
 
 
@@ -105,9 +106,10 @@ class FastBirthDeath:
 
     @unit_jit
     def simulate_history(
-        self, rng: np.random.Generator, max_time: Quantity, counts_out: np.ndarray
+        self, seed: int, max_time: Quantity, counts_out: np.ndarray
     ) -> Quantity:
         """Run Gillespie and return the event times as a Quantity array."""
+        rng = np.random.default_rng(seed)
         time_now = 0.0 * max_time
         count = self.init_count
         time_history_mag = np.empty(len(counts_out))
@@ -123,7 +125,7 @@ class FastBirthDeath:
                 break
 
             r1, r2 = rng.random(2)
-            time_now += math.log(1.0 / r1) / total
+            time_now += np.log(1.0 / r1) / total
 
             if r2 * total.magnitude < birth.magnitude:
                 count += 1
@@ -137,10 +139,77 @@ class FastBirthDeath:
         return time_history_mag[:n_events] * ureg.s
 
     def simulate(
-        self, rng: np.random.Generator, max_time: Quantity, max_events: int = MAX_EVENTS
+        self, seed: int, max_time: Quantity, max_events: int = MAX_EVENTS
     ) -> tuple[Quantity, np.ndarray]:
         counts = np.empty(max_events + 1, dtype=int)
-        times = self.simulate_history(rng, max_time, counts)
+        times = self.simulate_history(seed, max_time, counts)
+        return times, counts[: len(times)]
+
+#
+# Numba needs one self-free hot kernel. Unlike the plain unit_jit variant, this
+# path inlines the birth/death math instead of calling other decorated methods.
+@unit_jit(use_numba=True)
+def simulate_history_numba(
+    alpha: Quantity,
+    delta: Quantity,
+    volume: Quantity,
+    init_count: int,
+    seed: int,
+    max_time: Quantity,
+    counts_out: np.ndarray,
+) -> Quantity:
+    """Numba-capable Gillespie kernel with all hot logic in one function."""
+    np.random.seed(seed)
+    time_now = 0.0 * max_time
+    count = init_count
+    time_history_mag = np.empty(len(counts_out))
+    time_history_mag[0] = 0.0
+    counts_out[0] = count
+    n_events = 1
+
+    while time_now < max_time and n_events < len(counts_out):
+        birth = alpha * volume
+        death = delta * count
+        total = birth + death
+        if total.magnitude == 0.0:
+            break
+
+        r1 = np.random.random()
+        r2 = np.random.random()
+        time_now += np.log(1.0 / r1) / total
+
+        if r2 * total.magnitude < birth.magnitude:
+            count += 1
+        elif count > 0:
+            count -= 1
+
+        time_history_mag[n_events] = time_now.to_base_units().magnitude
+        counts_out[n_events] = count
+        n_events += 1
+
+    return time_history_mag[:n_events] * ureg.s
+
+
+class NumbaBirthDeath:
+    def __init__(self) -> None:
+        self.alpha = ALPHA
+        self.delta = DELTA
+        self.volume = VOLUME
+        self.init_count = INIT_COUNT
+
+    def simulate(
+        self, seed: int, max_time: Quantity, max_events: int = MAX_EVENTS
+    ) -> tuple[Quantity, np.ndarray]:
+        counts = np.empty(max_events + 1, dtype=int)
+        times = simulate_history_numba(
+            self.alpha,
+            self.delta,
+            self.volume,
+            self.init_count,
+            seed,
+            max_time,
+            counts,
+        )
         return times, counts[: len(times)]
 
 
@@ -154,9 +223,10 @@ def bench(fn, repeats: int) -> float:
 if __name__ == "__main__":
     plain = PlainBirthDeath()
     fast = FastBirthDeath()
+    numba = NumbaBirthDeath()
 
-    warmup_times, warmup_counts = fast.simulate(np.random.default_rng(0), MAX_TIME)
-    plain_times, plain_counts = plain.simulate(np.random.default_rng(0), MAX_TIME)
+    warmup_times, warmup_counts = fast.simulate(0, MAX_TIME)
+    plain_times, plain_counts = plain.simulate(0, MAX_TIME)
     np.testing.assert_allclose(
         plain_times.to_base_units().magnitude,
         warmup_times.to_base_units().magnitude,
@@ -165,10 +235,20 @@ if __name__ == "__main__":
     )
     np.testing.assert_array_equal(plain_counts, warmup_counts)
 
-    t_plain = bench(lambda: plain.simulate(np.random.default_rng(42), MAX_TIME), REPEATS)
-    t_fast = bench(lambda: fast.simulate(np.random.default_rng(42), MAX_TIME), REPEATS)
+    # First call infers and rewrites, second call triggers Numba compilation.
+    numba.simulate(0, MAX_TIME)
+    numba.simulate(0, MAX_TIME)
+
+    t_plain = bench(lambda: plain.simulate(42, MAX_TIME), REPEATS)
+    t_fast = bench(lambda: fast.simulate(42, MAX_TIME), REPEATS)
+    t_numba = bench(lambda: numba.simulate(42, MAX_TIME), REPEATS)
 
     print(f"plain Pint: {t_plain / REPEATS * 1e3:.2f} ms per call")
     print(
-        f"unit_jit:   {t_fast / REPEATS * 1e3:.2f} ms per call  ({t_plain / t_fast:.0f}x vs Pint)"
+        f"unit_jit:   {t_fast / REPEATS * 1e3:.2f} ms per call"
+        f"  ({t_plain / t_fast:.0f}x vs Pint)"
+    )
+    print(
+        f"unit_jit + Numba: {t_numba / REPEATS * 1e3:.2f} ms per call"
+        f"  ({t_plain / t_numba:.0f}x vs Pint)"
     )
