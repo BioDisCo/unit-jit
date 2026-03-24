@@ -194,7 +194,7 @@ class Model:
     def simulate(self, t: Quantity) -> Quantity:  # entry point: owns the hot loop
         dt   = 10.0 * ureg.s
         mrna = self.params.alpha / self.params.delta
-        n    = int((t / dt).to_base_units().magnitude)
+        n    = int(t / dt)
         out  = np.empty(n)
         for i in range(n):
             mrna = mrna + self.rate(mrna) * dt
