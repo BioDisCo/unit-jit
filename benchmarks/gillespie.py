@@ -18,9 +18,11 @@ Run with:
 import time
 
 import numpy as np
-from pint import Quantity
+from pint import Quantity, UnitRegistry
 
-from unit_jit import unit_jit, ureg
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 ALPHA = 1.0 / ureg.minute / ureg.femtoliter
 DELTA = 0.1 / ureg.minute

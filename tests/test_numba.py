@@ -2,11 +2,13 @@
 
 import numpy as np
 import pytest
-from pint import Quantity
+from pint import Quantity, UnitRegistry
 
 numba = pytest.importorskip("numba")
 
-from unit_jit import unit_jit, ureg  # noqa: E402
+from unit_jit import unit_jit  # noqa: E402
+
+ureg = UnitRegistry()
 
 
 @unit_jit(use_numba=True)

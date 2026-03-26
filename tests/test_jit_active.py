@@ -6,10 +6,12 @@ These tests check the internal state to confirm that:
 """
 
 import pytest
-from pint import Quantity
+from pint import Quantity, UnitRegistry
 
 import unit_jit as _uj
-from unit_jit import get_rewritten_source, unit_jit, ureg
+from unit_jit import get_rewritten_source, unit_jit
+
+ureg = UnitRegistry()
 
 
 def _jit_active(func: object) -> bool:
@@ -186,8 +188,9 @@ def test_jit_disabled_on_inference_failure(caplog):
     # Build a function whose source cannot be retrieved by inspect.getsource.
     globs: dict = {}
     exec(  # noqa: S102
-        "from unit_jit import unit_jit, ureg\n"
-        "from pint import Quantity\n"
+        "from unit_jit import unit_jit\n"
+        "from pint import Quantity, UnitRegistry\n"
+        "ureg = UnitRegistry()\n"
         "@unit_jit\n"
         "def _no_src(x: Quantity) -> Quantity:\n"
         "    return x * 2.0\n",

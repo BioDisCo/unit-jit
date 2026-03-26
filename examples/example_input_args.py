@@ -10,9 +10,11 @@ Two cases are shown:
 """
 
 import numpy as np
-from pint import Quantity
+from pint import Quantity, UnitRegistry
 
-from unit_jit import unit_jit, ureg
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 
 @unit_jit(input_args=(ureg.m, ureg.s))

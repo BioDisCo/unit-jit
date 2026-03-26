@@ -43,7 +43,6 @@ from unit_jit._inferrer import (  # noqa: E402
     infer_return_units,
 )
 
-ureg = UnitRegistry()
 _log = logging.getLogger(__name__)
 
 _fast_zone = threading.local()
@@ -53,7 +52,7 @@ _rewritten_src: dict[str, str] = {}  # qualname -> rewritten source
 _return_units: dict[str, Any] = {}
 _arg_dims: dict[str, tuple[list[Any], dict[str, Any]]] = {}  # qualname -> (positional, keyword)
 _use_numba: set[str] = set()  # qualnames for which numba.jit should be applied
-_return_registry: dict[str, UnitRegistry] = {}  # qualname -> registry used to wrap results
+_return_registry: dict[str, UnitRegistry | None] = {}  # qualname -> registry used to wrap results
 _jit_disabled: set[str] = set()  # qualnames where inference failed: always run original
 
 
@@ -167,7 +166,7 @@ def _to_fast(arg: Any) -> Any:
     return _snapshot(arg)
 
 
-def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry) -> Any:
+def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry | None) -> Any:
     """Wrap a float/array result back into a Quantity using cached SI units.
 
     Handles nested structures: _ListReturn entries may themselves be _ListReturn,
@@ -176,6 +175,7 @@ def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry) -> Any:
     """
     if unit_info is None:
         return result
+    assert wrap_ureg is not None
     if isinstance(unit_info, _ListReturn):
         n = len(result)
         units = unit_info.units
@@ -348,12 +348,16 @@ def unit_jit(
                     for k, v in kwargs.items()
                 },
             )
-            inferred_info, inferred_reg = infer_return_units(
-                func, args, kwargs, _return_units, ureg
-            )
+            inferred_info, inferred_reg = infer_return_units(func, args, kwargs, _return_units)
             if inferred_info is not _SENTINEL:
                 _return_units[qualname] = inferred_info
-                _return_registry[qualname] = inferred_reg if inferred_reg is not None else ureg
+                if inferred_info is not None and inferred_reg is None:
+                    raise RuntimeError(
+                        f"'{func.__qualname__}': could not determine a UnitRegistry from "
+                        "arguments or module globals; pass Quantity arguments or define "
+                        "ureg = UnitRegistry() at module level."
+                    )
+                _return_registry[qualname] = inferred_reg
                 # Fall through to fast path below.
             else:
                 # Inference failed: disable JIT for this function permanently.

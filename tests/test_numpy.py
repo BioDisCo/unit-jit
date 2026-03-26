@@ -4,9 +4,11 @@ from typing import cast
 
 import numpy as np
 import pytest
-from pint import Quantity
+from pint import Quantity, UnitRegistry
 
-from unit_jit import unit_jit, ureg
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 # Shared decorated functions
 

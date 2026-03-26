@@ -9,9 +9,11 @@ overhead on every call; simulate_fast runs as plain floats on every call. Run wi
 import time
 
 import numpy as np
-from pint import Quantity
+from pint import Quantity, UnitRegistry
 
-from unit_jit import unit_jit, ureg
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 
 @unit_jit

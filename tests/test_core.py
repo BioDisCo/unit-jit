@@ -5,9 +5,11 @@ from typing import cast
 
 import numpy as np
 import pytest
-from pint import Quantity
+from pint import Quantity, UnitRegistry
 
-from unit_jit import unit_jit, ureg
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 # Shared decorated functions (all compiled together on first call)
 
@@ -169,7 +171,7 @@ def test_body_mul_matching_constant():
 
 
 def test_body_mul_then_add_mismatched_raises():
-    """Multiplying by a unit constant then adding the original (wrong dim) raises TypeError on first call."""
+    """Multiplying by a unit constant then adding the original (wrong dim) raises TypeError."""
 
     @unit_jit
     def _bad_mul_add(d: Quantity) -> Quantity:
@@ -189,7 +191,7 @@ def test_body_if_branch_matching_constant():
 
 
 def test_body_if_branch_mismatched_constant_raises():
-    """A mismatched constant in one branch raises TypeError on the first call (inferrer checks all branches)."""
+    """A mismatched constant in one branch raises TypeError on first call."""
 
     @unit_jit
     def _bad_branch(d: Quantity, t: Quantity, flag: bool) -> Quantity:
@@ -234,7 +236,7 @@ def test_self_attr_dimension_mismatch_in_body_raises():
 
 
 def test_namedtuple_params_body_dimension_mismatch_raises():
-    """Method body that adds two NamedTuple params of incompatible dimensions is caught at inference."""
+    """NamedTuple params of incompatible dimensions are caught at inference."""
 
     class _BadNTModel:
         def __init__(self, params: _NTParams) -> None:
