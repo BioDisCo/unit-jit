@@ -15,7 +15,26 @@ from collections.abc import Callable
 from typing import Any
 
 import libcst as cst
-from pint import Quantity, UnitRegistry
+from pint import Quantity, Unit, UnitRegistry
+
+
+def _collect_types() -> tuple[tuple[type, ...], tuple[type, ...], tuple[type, ...]]:
+    qtypes: list[type] = [Quantity]
+    rtypes: list[type] = [UnitRegistry]
+    utypes: list[type] = [Unit]
+    try:
+        import pintrs as _pintrs  # optional dependency
+
+        for attr, lst in (("Quantity", qtypes), ("UnitRegistry", rtypes), ("Unit", utypes)):
+            t = getattr(_pintrs, attr, None)
+            if t is not None:
+                lst.append(t)
+    except ImportError:
+        pass
+    return tuple(qtypes), tuple(rtypes), tuple(utypes)
+
+
+_QUANTITY_TYPES, _REGISTRY_TYPES, _UNIT_TYPES = _collect_types()
 
 _log = logging.getLogger("unit_jit")
 
@@ -326,7 +345,7 @@ def _extract_attr_units(obj: Any) -> dict[str, Any]:
     for k, v in items:
         if k == _SNAP_KEY:
             continue
-        if isinstance(v, Quantity):
+        if isinstance(v, _QUANTITY_TYPES):
             result[k] = v.to_base_units().units
         elif hasattr(type(v), "_fields"):  # nested NamedTuple
             nested = _extract_attr_units(v)
@@ -690,7 +709,7 @@ def infer_return_units(
         param_names = list(sig.parameters.keys())
 
         def _arg_unit(arg: Any) -> Any:
-            if isinstance(arg, Quantity):
+            if isinstance(arg, _QUANTITY_TYPES):
                 return arg.to_base_units().units
             if isinstance(arg, list):
                 return _ListReturn("list", [_arg_unit(el) for el in arg])
@@ -703,13 +722,15 @@ def infer_return_units(
         env.update({name: _arg_unit(arg) for name, arg in kwargs.items()})
 
         module_globals = func.__globals__
-        ureg_vars = {k: v for k, v in module_globals.items() if isinstance(v, UnitRegistry)}
+        ureg_vars = {k: v for k, v in module_globals.items() if isinstance(v, _REGISTRY_TYPES)}
 
         param_objects = {
-            name: arg for name, arg in zip(param_names, args) if not isinstance(arg, Quantity)
+            name: arg
+            for name, arg in zip(param_names, args)
+            if not isinstance(arg, _QUANTITY_TYPES)
         }
         param_objects.update(
-            {name: arg for name, arg in kwargs.items() if not isinstance(arg, Quantity)}
+            {name: arg for name, arg in kwargs.items() if not isinstance(arg, _QUANTITY_TYPES)}
         )
 
         inferred = _UnitInferrer(env, ureg_vars, module_globals, return_units, param_objects).infer(
@@ -724,9 +745,9 @@ def infer_return_units(
             # so return unit cannot be determined; JIT will be disabled for this function.
             return _SENTINEL, None
 
-        def _find_reg(arg: Any) -> UnitRegistry | None:
-            if isinstance(arg, Quantity):
-                return arg._REGISTRY  # noqa: SLF001
+        def _find_reg(arg: Any) -> Any:
+            if isinstance(arg, _QUANTITY_TYPES):
+                return getattr(arg, "_REGISTRY", None)  # noqa: SLF001
             if isinstance(arg, (list, tuple)):
                 return next((r for el in arg if (r := _find_reg(el)) is not None), None)
             return None

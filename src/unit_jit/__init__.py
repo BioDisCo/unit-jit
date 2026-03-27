@@ -32,11 +32,14 @@ from collections.abc import Callable
 from typing import Any, overload
 
 import libcst as cst
-from pint import Quantity, Unit, UnitRegistry
+from pint import UnitRegistry
 
 from unit_jit._inferrer import (  # noqa: E402
+    _QUANTITY_TYPES,
+    _REGISTRY_TYPES,
     _SENTINEL,
     _SNAP_KEY,
+    _UNIT_TYPES,
     _UNKNOWN,  # noqa: F401 (re-exported for tests)
     _ListReturn,
     _strip_decorators,
@@ -123,7 +126,7 @@ def _snapshot(obj: Any) -> Any:
     For other objects, returns an instance of the same class (so method lookup
     still works) with a float-valued __dict__.
     """
-    if isinstance(obj, Quantity):
+    if isinstance(obj, _QUANTITY_TYPES):
         return obj.to_base_units().magnitude
     if hasattr(type(obj), "_fields"):  # NamedTuple
         return type(obj)._make(_snapshot(v) for v in obj)  # type: ignore[attr-defined]
@@ -131,7 +134,7 @@ def _snapshot(obj: Any) -> Any:
         snap = object.__new__(type(obj))
         snap_dict: dict[str, Any] = {_SNAP_KEY: True}
         for name, val in getattr(obj, "__dict__", {}).items():
-            if isinstance(val, Quantity):
+            if isinstance(val, _QUANTITY_TYPES):
                 snap_dict[name] = val.to_base_units().magnitude
             elif (
                 hasattr(val, "__dict__")
@@ -151,7 +154,7 @@ def _snapshot(obj: Any) -> Any:
 
 def _to_fast(arg: Any) -> Any:
     """Convert a Quantity to an SI float; snapshot complex objects; leave the rest unchanged."""
-    if isinstance(arg, Quantity):
+    if isinstance(arg, _QUANTITY_TYPES):
         return arg.to_base_units().magnitude
     if isinstance(arg, list):
         return [_to_fast(el) for el in arg]
@@ -200,7 +203,7 @@ def _compile_module(module_name: str) -> None:
     """Rewrite all @unit_jit functions from a module at once."""
     funcs = _registry[module_name]
     module_globals = funcs[0].__globals__
-    ureg_vars = {k: v for k, v in module_globals.items() if isinstance(v, UnitRegistry)}
+    ureg_vars = {k: v for k, v in module_globals.items() if isinstance(v, _REGISTRY_TYPES)}
     stripper = _QuantityStripper(ureg_vars)
     fast: dict[str, Callable[..., Any]] = {}
 
@@ -342,9 +345,9 @@ def unit_jit(
         # Entry point: infer units on first call via abstract interpretation.
         if qualname not in _return_units:
             _arg_dims[qualname] = (
-                [a.dimensionality if isinstance(a, Quantity) else None for a in args],
+                [a.dimensionality if isinstance(a, _QUANTITY_TYPES) else None for a in args],
                 {
-                    k: v.dimensionality if isinstance(v, Quantity) else None
+                    k: v.dimensionality if isinstance(v, _QUANTITY_TYPES) else None
                     for k, v in kwargs.items()
                 },
             )
@@ -375,17 +378,25 @@ def unit_jit(
         if qualname in _arg_dims:
             pos_dims, kw_dims = _arg_dims[qualname]
             for i, (arg, dim) in enumerate(zip(args, pos_dims)):
-                if dim is not None and isinstance(arg, Quantity) and arg.dimensionality != dim:
+                if (
+                    dim is not None
+                    and isinstance(arg, _QUANTITY_TYPES)
+                    and arg.dimensionality != dim
+                ):  # noqa: E501
                     raise TypeError(
                         f"{func.__qualname__}: argument {i} has dimensions "
                         f"{dict(arg.dimensionality)}, expected {dict(dim)}"
                     )
             for key, dim in kw_dims.items():
-                arg = kwargs.get(key)
-                if dim is not None and isinstance(arg, Quantity) and arg.dimensionality != dim:  # type: ignore[union-attr]
+                arg: Any = kwargs.get(key)
+                if (
+                    dim is not None
+                    and isinstance(arg, _QUANTITY_TYPES)
+                    and arg.dimensionality != dim
+                ):
                     raise TypeError(
                         f"{func.__qualname__}: argument '{key}' has dimensions "
-                        f"{dict(arg.dimensionality)}, expected {dict(dim)}"  # type: ignore[union-attr]
+                        f"{dict(arg.dimensionality)}, expected {dict(dim)}"
                     )
         fast_args = tuple(_to_fast(a) for a in args)
         fast_kwargs = {k: _to_fast(v) for k, v in kwargs.items()}
@@ -401,8 +412,9 @@ def unit_jit(
     wrapper.__module__ = func.__module__
     wrapper.__doc__ = func.__doc__
     wrapper.__annotations__ = func.__annotations__
-    wrapper.__unit_jit_wrapped__ = True
-    wrapper.__wrapped__ = func  # standard unwrap convention
+    w: Any = wrapper
+    w.__unit_jit_wrapped__ = True
+    w.__wrapped__ = func  # standard unwrap convention
     if input_args is not None:
-        wrapper(*(1 * a if isinstance(a, Unit) else a for a in input_args))
+        wrapper(*(1 * a if isinstance(a, _UNIT_TYPES) else a for a in input_args))
     return wrapper  # type: ignore[return-value]
