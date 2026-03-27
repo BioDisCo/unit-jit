@@ -16,7 +16,7 @@ import numpy as np
 from bcrnnoise import BCRN
 from pint import Quantity, UnitRegistry
 
-ureg = UnitRegistry()
+ureg: UnitRegistry = UnitRegistry()
 
 INIT_MRNA = 0.0 / ureg.femtoliter
 VOLUME = 1.0 * ureg.femtoliter

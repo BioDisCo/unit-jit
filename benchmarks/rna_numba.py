@@ -14,7 +14,7 @@ from pint import Quantity, UnitRegistry
 
 from unit_jit import unit_jit
 
-ureg = UnitRegistry()
+ureg: UnitRegistry = UnitRegistry()
 
 
 @unit_jit

@@ -22,7 +22,7 @@ from pint import Quantity, UnitRegistry
 
 from unit_jit import unit_jit
 
-ureg = UnitRegistry()
+ureg: UnitRegistry = UnitRegistry()
 
 ALPHA = 1.0 / ureg.minute / ureg.femtoliter
 DELTA = 0.1 / ureg.minute

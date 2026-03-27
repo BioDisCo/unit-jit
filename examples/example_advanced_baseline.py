@@ -11,7 +11,7 @@ from typing import cast
 import numpy as np
 from pint import Quantity, UnitRegistry
 
-ureg = UnitRegistry()
+ureg: UnitRegistry = UnitRegistry()
 
 
 @dataclass

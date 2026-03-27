@@ -25,7 +25,12 @@ def _collect_types() -> tuple[tuple[type, ...], tuple[type, ...], tuple[type, ..
     try:
         import pintrs as _pintrs  # optional dependency
 
-        for attr, lst in (("Quantity", qtypes), ("UnitRegistry", rtypes), ("Unit", utypes)):
+        for attr, lst in (
+            ("Quantity", qtypes),
+            ("ArrayQuantity", qtypes),
+            ("UnitRegistry", rtypes),
+            ("Unit", utypes),
+        ):
             t = getattr(_pintrs, attr, None)
             if t is not None:
                 lst.append(t)
