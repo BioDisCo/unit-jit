@@ -572,7 +572,11 @@ class _UnitInferrer:
                 self.env[var_name] = _ListReturn("list", [elem_unit])
         elif method == "extend" and call.args:
             iter_unit = self._expr(call.args[0].value)
-            elem_unit = iter_unit.units[0] if isinstance(iter_unit, _ListReturn) and iter_unit.units else None
+            elem_unit = (
+                iter_unit.units[0]
+                if isinstance(iter_unit, _ListReturn) and iter_unit.units
+                else None
+            )
             if isinstance(existing, _ListReturn):
                 self.env[var_name] = _ListReturn(existing.kind, [elem_unit], cls=existing.cls)
             else:
@@ -656,7 +660,11 @@ class _UnitInferrer:
             while for_in is not None:
                 iter_unit = self._expr(for_in.iter)
                 # Iteration variable gets element unit of the iterable.
-                elem_unit = iter_unit.units[0] if isinstance(iter_unit, _ListReturn) and iter_unit.units else None
+                elem_unit = (
+                    iter_unit.units[0]
+                    if isinstance(iter_unit, _ListReturn) and iter_unit.units
+                    else None
+                )
                 if isinstance(for_in.target, cst.Name):
                     self.env[for_in.target.value] = elem_unit
                 for_in = for_in.inner_for_in

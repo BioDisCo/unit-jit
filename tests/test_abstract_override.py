@@ -22,8 +22,9 @@ import functools
 from abc import ABC, abstractmethod
 from typing import cast
 
-import unit_jit as _uj
 from pint import Quantity, UnitRegistry
+
+import unit_jit as _uj
 from unit_jit import compile as unit_jit_compile
 from unit_jit import unit_jit
 
@@ -162,7 +163,7 @@ class _AutoCompileBase:
             orig_init = cls.__dict__["__init__"]
 
             @functools.wraps(orig_init)
-            def _init_with_compile(self: "_AutoCompileBase", *args: object, **kw: object) -> None:
+            def _init_with_compile(self: _AutoCompileBase, *args: object, **kw: object) -> None:
                 orig_init(self, *args, **kw)  # type: ignore[misc]
                 unit_jit_compile(self)
 

@@ -9,7 +9,7 @@ cls._make() to rebuild the NamedTuple with all fields wrapped back to Quantity.
 
 from __future__ import annotations
 
-from typing import NamedTuple, cast
+from typing import NamedTuple
 
 import pytest
 from pint import Quantity, UnitRegistry

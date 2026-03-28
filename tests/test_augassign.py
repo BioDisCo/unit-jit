@@ -9,8 +9,6 @@ before delegating to _binop.
 
 from __future__ import annotations
 
-from typing import cast
-
 import pytest
 from pint import Quantity, UnitRegistry
 

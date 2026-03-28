@@ -314,12 +314,14 @@ def compile(instance: Any) -> None:  # noqa: A001 (intentional shadow of built-i
         # Bare Quantity — match by parameter name first to pick the right unit.
         # Also accept string annotations produced by `from __future__ import annotations`.
         ann_str = str(ann)
-        _is_bare_quantity = ann in _QUANTITY_TYPES or (
-            isinstance(ann, type) and issubclass(ann, tuple(_QUANTITY_TYPES))
-        ) or (
-            isinstance(ann, str)
-            and "Quantity" in ann_str
-            and not any(c in ann_str for c in ("Sequence", "list", "List", "["))
+        _is_bare_quantity = (
+            ann in _QUANTITY_TYPES
+            or (isinstance(ann, type) and issubclass(ann, tuple(_QUANTITY_TYPES)))
+            or (
+                isinstance(ann, str)
+                and "Quantity" in ann_str
+                and not any(c in ann_str for c in ("Sequence", "list", "List", "["))
+            )
         )
         if _is_bare_quantity:
             pname = param.name.lower().lstrip("_")
