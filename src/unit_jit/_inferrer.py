@@ -14,6 +14,7 @@ import types
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import libcst as cst
 from pint import Quantity, Unit, UnitRegistry
 
@@ -50,6 +51,40 @@ _SNAP_KEY = "__unit_jit_snap__"
 _SENTINEL: object = object()
 # Sentinel: unit cannot be determined (unresolved call), distinct from None = dimensionless.
 _UNKNOWN: object = object()
+
+# All methods on np.random.Generator that return plain (dimensionless) int/float/ndarray.
+_RNG_DIMENSIONLESS_METHODS: frozenset[str] = frozenset({
+    "poisson",
+    "binomial",
+    "geometric",
+    "negative_binomial",
+    "hypergeometric",
+    "multinomial",
+    "standard_normal",
+    "normal",
+    "exponential",
+    "standard_exponential",
+    "standard_gamma",
+    "standard_t",
+    "uniform",
+    "random",
+    "integers",
+    "choice",
+    "permutation",
+    "shuffle",
+    "rayleigh",
+    "laplace",
+    "logistic",
+    "gumbel",
+    "pareto",
+    "weibull",
+    "power",
+    "vonmises",
+    "beta",
+    "chisquare",
+    "f",
+    "gamma",
+})
 
 
 class _ListReturn:
@@ -332,6 +367,28 @@ _KNOWN_CALLS: dict[str, Callable[[list[Any]], Any]] = {
     "np.cbrt": _cbrt,
     # ---- numpy.linalg: solve Ax=b, x has units [b]/[A] ----------------
     "np.linalg.solve": lambda us: _unit_div(us[1], us[0]) if len(us) > 1 else None,
+    # ---- numpy: shape/structure (dimensionless output) --------------------
+    "np.shape": _d,
+    "np.ndim": _d,
+    "np.size": _d,
+    # ---- numpy: array manipulation (unit-preserving first arg) ------------
+    "np.atleast_1d": _p,
+    "np.atleast_2d": _p,
+    "np.atleast_3d": _p,
+    "np.add.reduceat": _p,
+    "np.multiply.reduceat": _p,
+    "np.maximum.reduceat": _p,
+    "np.minimum.reduceat": _p,
+    "np.searchsorted": _d,
+    "np.unravel_index": _d,
+    "np.ravel_index": _d,
+    "np.unique": _p,
+    "np.where": lambda us: us[1] if len(us) > 1 else None,
+    "np.select": lambda us: us[0] if us else None,
+    "np.piecewise": _p,
+    "np.frompyfunc": _d,
+    "np.fromiter": _d,
+    "np.fromfunction": _d,
 }
 
 
@@ -389,6 +446,7 @@ class _UnitInferrer:
         self.return_units = return_units
         self.param_objects: dict[str, Any] = param_objects or {}
         self._return: Any = _SENTINEL  # _SENTINEL = no return seen yet
+        self._inferring: set[str] = set()  # qualnames currently being lazily inferred (cycle guard)
 
     def infer(self, func_node: cst.FunctionDef) -> Any:
         """Return inferred return unit (pint.Unit | None), or _SENTINEL if no return found."""
@@ -534,8 +592,11 @@ class _UnitInferrer:
                 slice_node = node.slice[0].slice
                 if isinstance(slice_node, cst.Index):
                     idx = _eval_literal(slice_node.value)
-                    if idx is not None and 0 <= int(idx) < len(container.units):
-                        return container.units[int(idx)]
+                    if idx is not None:
+                        n = len(container.units)
+                        i = int(idx)
+                        if -n <= i < n:
+                            return container.units[i]
                 return None  # unknown index: conservative
             return container
         return None
@@ -611,9 +672,12 @@ class _UnitInferrer:
             method_name = node.func.attr.value
             obj = self.param_objects.get(receiver_name)
             if obj is not None:
-                qualname = f"{type(obj).__qualname__}.{method_name}"
-                if qualname in self.return_units:
-                    return self.return_units[qualname]
+                # np.random.Generator methods always return plain (dimensionless) values.
+                if isinstance(obj, np.random.Generator) and method_name in _RNG_DIMENSIONLESS_METHODS:
+                    return None
+                obj_qualname = f"{type(obj).__qualname__}.{method_name}"
+                if obj_qualname in self.return_units:
+                    return self.return_units[obj_qualname]
 
         # @unit_jit callee already inferred
         if func_name and func_name in self.module_globals:
@@ -621,6 +685,19 @@ class _UnitInferrer:
             callee_qualname = getattr(callee, "__qualname__", None)
             if callee_qualname and callee_qualname in self.return_units:
                 return self.return_units[callee_qualname]
+            # Callee is @unit_jit but not yet inferred (e.g. because it uses RNG and was
+            # disabled, or because inference runs in a different order than call order).
+            # Trigger lazy inference now so the cross-call unit is resolved correctly.
+            if (
+                callee_qualname
+                and getattr(callee, "__unit_jit_wrapped__", False)
+                and callee_qualname not in self._inferring
+            ):
+                lazy = self._lazy_infer_callee(
+                    getattr(callee, "__wrapped__", None), callee_qualname, node, arg_units
+                )
+                if lazy is not _UNKNOWN and lazy is not _SENTINEL:
+                    return lazy
 
         if func_name in _KNOWN_CALLS:
             try:
@@ -629,6 +706,64 @@ class _UnitInferrer:
                 return _UNKNOWN
 
         return _UNKNOWN
+
+    def _lazy_infer_callee(
+        self,
+        inner_func: Any,
+        callee_qualname: str,
+        node: cst.Call,
+        arg_units: list[Any],
+    ) -> Any:
+        """Infer return unit of an un-inferred @unit_jit callee without touching global state.
+
+        Constructs dummy arguments from the inferred arg_units plus actual runtime objects
+        for non-Quantity parameters (e.g. np.random.Generator), then runs inference
+        recursively. The result is returned to the caller's inference pass only; global
+        _return_units/_return_registry are updated in the normal boundary-entry path when
+        the callee is first called at the module boundary.
+        """
+        if inner_func is None:
+            return _UNKNOWN
+        reg = next(iter(self.ureg_vars.values()), None)
+        if reg is None:
+            # Module has no ureg global; fall back to the registry embedded in a unit object.
+            for u in arg_units:
+                if u is not None and u is not _UNKNOWN and hasattr(u, "_REGISTRY"):
+                    reg = u._REGISTRY  # noqa: SLF001
+                    break
+        if reg is None:
+            return _UNKNOWN
+
+        call_positional = [a for a in node.args if a.keyword is None]
+        dummy_args: list[Any] = []
+        for call_arg, unit in zip(call_positional, arg_units):
+            if unit is None or unit is _UNKNOWN:
+                # Non-Quantity arg: pass the actual runtime object when accessible by name.
+                if isinstance(call_arg.value, cst.Name):
+                    obj = self.param_objects.get(call_arg.value.value)
+                    if obj is not None:
+                        dummy_args.append(obj)
+                        continue
+                dummy_args.append(1.0)
+            else:
+                try:
+                    dummy_args.append(reg.Quantity(1.0, unit))
+                except Exception:
+                    dummy_args.append(1.0)
+
+        self._inferring.add(callee_qualname)
+        try:
+            inferred, _ = infer_return_units(inner_func, tuple(dummy_args), {}, self.return_units)
+        except TypeError:
+            return _UNKNOWN
+        except Exception:
+            return _UNKNOWN
+        finally:
+            self._inferring.discard(callee_qualname)
+
+        if inferred is _SENTINEL or inferred is _UNKNOWN:
+            return _UNKNOWN
+        return inferred
 
     def _resolve_name(self, node: Any) -> str:
         if isinstance(node, cst.Name):

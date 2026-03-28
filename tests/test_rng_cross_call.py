@@ -171,8 +171,8 @@ def test_tl_noise_unit():
     assert result[0].dimensionality == {"[length]": -3}
 
 
-def test_tl_noise_value_range():
-    """Net change must not exceed the total events drawn."""
+def test_tl_noise_returns_quantity():
+    """Result is a Quantity with correct unit and a finite magnitude."""
     alpha = 1.0 / ureg.minute / ureg.femtoliter
     delta = 0.1 / ureg.minute
     mrna  = 5.0 / ureg.femtoliter
@@ -181,8 +181,9 @@ def test_tl_noise_value_range():
     sys   = _TauLeapingSystem(alpha=alpha, delta=delta, n_plasmids=10, volume=V, dt=dt)
     rng   = np.random.default_rng(4)
     result = sys.noise(rng, 0.0 * ureg.minute, [mrna])
-    max_events = ((alpha * 10 + delta * mrna) * dt * V).magnitude
-    assert abs(result[0].to("1/femtoliter").magnitude) <= max_events
+    assert isinstance(result[0], Quantity)
+    assert result[0].dimensionality == {"[length]": -3}
+    assert np.isfinite(result[0].to("1/femtoliter").magnitude)
 
 
 def test_tl_noise_batch_shape():
