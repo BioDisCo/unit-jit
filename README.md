@@ -406,7 +406,7 @@ The additional 5x on top of unit_jit comes from Numba compiling the inner loop t
 
 ## pintrs compatibility
 
-`unit-jit` also works with [pintrs](https://github.com/Borda/pintrs), a Rust-backed drop-in replacement for Pint. No configuration is needed: if pintrs is installed, its `Quantity`, `UnitRegistry`, and `Unit` types are detected automatically alongside pint's.
+`unit-jit` also works with [pintrs](https://github.com/BioDisCo/pintrs), a Rust-backed drop-in replacement for Pint. No configuration is needed: if pintrs is installed, its `Quantity`, `UnitRegistry`, and `Unit` types are detected automatically alongside pint's.
 
 ```python
 import pintrs
