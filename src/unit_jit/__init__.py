@@ -27,11 +27,13 @@ import inspect
 import logging
 import textwrap
 import threading
+import weakref
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any, overload
 
 import libcst as cst
+import numpy as np
 from pint import UnitRegistry
 
 from unit_jit._inferrer import (  # noqa: E402
@@ -57,6 +59,7 @@ _arg_dims: dict[str, tuple[list[Any], dict[str, Any]]] = {}  # qualname -> (posi
 _use_numba: set[str] = set()  # qualnames for which numba.jit should be applied
 _return_registry: dict[str, UnitRegistry | None] = {}  # qualname -> registry used to wrap results
 _jit_disabled: set[str] = set()  # qualnames where inference failed: always run original
+_snapshot_cache: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
 
 
 def _in_fast_zone() -> bool:
@@ -125,11 +128,33 @@ def _snapshot(obj: Any) -> Any:
     NamedTuples are reconstructed with each field recursively snapshotted.
     For other objects, returns an instance of the same class (so method lookup
     still works) with a float-valued __dict__.
+
+    Results are cached in a WeakKeyDictionary so that repeated calls with the
+    same object (e.g. self on every SDE step) pay the Pint conversion cost only
+    once.  The cache entry is evicted automatically when the object is garbage
+    collected.  Caching is skipped for objects whose __dict__ may change
+    (detected by the _SNAP_KEY sentinel already being present, meaning we have
+    already snapshotted and there is nothing to do).
     """
     if isinstance(obj, _QUANTITY_TYPES):
         return obj.to_base_units().magnitude
-    if hasattr(type(obj), "_fields"):  # NamedTuple
-        return type(obj)._make(_snapshot(v) for v in obj)  # type: ignore[attr-defined]
+    if hasattr(type(obj), "_fields"):  # NamedTuple — immutable, always cache-safe
+        try:
+            cached = _snapshot_cache[obj]
+            return cached
+        except (KeyError, TypeError):
+            pass
+        result = type(obj)._make(_snapshot(v) for v in obj)  # type: ignore[attr-defined]
+        try:
+            _snapshot_cache[obj] = result
+        except TypeError:
+            pass
+        return result
+    try:
+        cached = _snapshot_cache[obj]
+        return cached
+    except (KeyError, TypeError):
+        pass
     try:
         snap = object.__new__(type(obj))
         snap_dict: dict[str, Any] = {_SNAP_KEY: True}
@@ -147,6 +172,10 @@ def _snapshot(obj: Any) -> Any:
             else:
                 snap_dict[name] = val
         snap.__dict__.update(snap_dict)
+        try:
+            _snapshot_cache[obj] = snap
+        except TypeError:
+            pass
         return snap
     except Exception:
         return obj  # fallback: use original object as-is
@@ -231,6 +260,100 @@ def _compile_module(module_name: str) -> None:
             fast[func.__name__] = func
 
     _compiled[module_name] = fast
+
+
+def compile(instance: Any) -> None:  # noqa: A001 (intentional shadow of built-in)
+    """Pre-warm unit inference for all @unit_jit methods on *instance*.
+
+    Iterates every @unit_jit-wrapped method defined on ``type(instance)`` and
+    triggers the first-call inference path.  Dummy argument values are derived
+    from the method's parameter type annotations:
+
+    * ``np.random.Generator`` parameters → ``np.random.default_rng(0)``
+    * ``Quantity`` parameters → ``1 * <matching attr unit>`` from the instance
+    * ``Sequence[Quantity]`` / list-of-Quantity parameters → ``self.init_state``
+      equivalent, built from Quantity attrs on the instance
+    * Everything else → skipped (inference may fall back to lazy on first real call)
+
+    After all methods have been attempted, any stale snapshot that was cached for
+    ``instance`` during failed warm-up calls is evicted from ``_snapshot_cache``
+    so that the next real call builds a fresh, fully-populated snapshot.
+
+    Call this once after constructing an instance if you need inner method
+    calls (e.g. ``self.reaction_rates(...)`` called from within a JIT-fast
+    function) to be compiled before the first real call.
+    """
+    # Collect all Quantity attrs (and one level of nesting) on the instance.
+    qty_pool: list[Any] = []
+    for val in vars(instance).values():
+        if isinstance(val, _QUANTITY_TYPES):
+            qty_pool.append(1 * val.units)
+        elif hasattr(val, "__dict__"):
+            for inner_val in vars(val).values():
+                if isinstance(inner_val, _QUANTITY_TYPES):
+                    qty_pool.append(1 * inner_val.units)
+
+    qty_list = list(qty_pool)  # dummy Sequence[Quantity] arg
+
+    def _dummy_for_param(param: inspect.Parameter) -> Any:
+        """Build a dummy value for one function parameter based on its annotation."""
+        ann = param.annotation
+        if ann is inspect.Parameter.empty:
+            return None  # can't guess; skip
+        # np.random.Generator
+        if ann is np.random.Generator or ann == "np.random.Generator":
+            return np.random.default_rng(0)
+        # Bare Quantity — match by parameter name first to pick the right unit.
+        if ann in _QUANTITY_TYPES or (
+            isinstance(ann, type) and issubclass(ann, tuple(_QUANTITY_TYPES))
+        ):
+            pname = param.name.lower().lstrip("_")
+            if pname in ("t", "time", "dt") and hasattr(instance, "time_horizon"):
+                return 1 * instance.time_horizon.units  # type: ignore[operator]
+            return qty_pool[0] if qty_pool else None
+        # list / Sequence of Quantity — use init_state if available (correct species units),
+        # otherwise fall back to the generic qty_list (may have wrong units for some methods).
+        ann_str = str(ann)
+        if "Quantity" in ann_str and (
+            "Sequence" in ann_str or "list" in ann_str or "List" in ann_str
+        ):
+            init = getattr(instance, "init_state", None)
+            return list(init) if init is not None else qty_list
+        return None
+
+    for name in dir(type(instance)):
+        if name.startswith("__"):
+            continue
+        method = getattr(type(instance), name, None)
+        if method is None or not getattr(method, "__unit_jit_wrapped__", False):
+            continue
+        qualname = method.__qualname__
+        if qualname in _return_units or qualname in _jit_disabled:
+            continue  # already compiled
+        inner_func = getattr(method, "__wrapped__", None)
+        if inner_func is None:
+            continue
+        # Build dummy args from the function's type annotations, skipping 'self'.
+        try:
+            sig = inspect.signature(inner_func)
+        except (ValueError, TypeError):
+            continue
+        params = list(sig.parameters.values())[1:]  # drop 'self'
+        dummy_args = [_dummy_for_param(p) for p in params]
+        if any(a is None for a in dummy_args):
+            continue  # can't build complete dummy args; skip
+        bound = getattr(instance, name)
+        try:
+            bound(*dummy_args)
+        except Exception:
+            pass  # inference errors are non-fatal
+
+    # Evict any stale snapshot that was cached during warm-up calls so the next
+    # real simulation call builds a fresh snapshot with all instance attributes.
+    try:
+        del _snapshot_cache[instance]
+    except (KeyError, TypeError):
+        pass
 
 
 def get_rewritten_source(func: Callable[..., Any]) -> str:

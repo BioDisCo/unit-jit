@@ -7,6 +7,7 @@ executing the function.
 
 from __future__ import annotations
 
+import functools
 import inspect
 import logging
 import textwrap
@@ -683,6 +684,27 @@ class _UnitInferrer:
                 obj_qualname = f"{type(obj).__qualname__}.{method_name}"
                 if obj_qualname in self.return_units:
                     return self.return_units[obj_qualname]
+                # Method is @unit_jit-wrapped on the concrete class but not yet inferred
+                # (e.g. an overridden abstract method in a subclass from a different module).
+                # Trigger lazy inference now, just like we do for module-level callees.
+                bound_method = getattr(type(obj), method_name, None)
+                if (
+                    bound_method is not None
+                    and getattr(bound_method, "__unit_jit_wrapped__", False)
+                    and obj_qualname not in self._inferring
+                ):
+                    inner = getattr(bound_method, "__wrapped__", None)
+                    # Bind `obj` as `self` so _lazy_infer_callee sees only the
+                    # explicit call args (x, …) rather than (self, x, …).
+                    inner_bound = functools.partial(inner, obj) if inner is not None else None
+                    lazy = self._lazy_infer_callee(
+                        inner_bound,
+                        obj_qualname,
+                        node,
+                        arg_units,
+                    )
+                    if lazy is not _UNKNOWN and lazy is not _SENTINEL:
+                        return lazy
 
         # @unit_jit callee already inferred
         if func_name and func_name in self.module_globals:
