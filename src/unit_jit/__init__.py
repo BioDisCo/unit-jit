@@ -522,10 +522,12 @@ def unit_jit(
                     and isinstance(arg, _QUANTITY_TYPES)
                     and arg.dimensionality != dim
                 ):  # noqa: E501
-                    raise TypeError(
+                    msg = (
                         f"{func.__qualname__}: argument {i} has dimensions "
                         f"{dict(arg.dimensionality)}, expected {dict(dim)}"
                     )
+                    _log.warning("dimension mismatch: %s", msg)
+                    raise TypeError(msg)
             for key, dim in kw_dims.items():
                 arg: Any = kwargs.get(key)
                 if (
@@ -533,10 +535,12 @@ def unit_jit(
                     and isinstance(arg, _QUANTITY_TYPES)
                     and arg.dimensionality != dim
                 ):
-                    raise TypeError(
+                    msg = (
                         f"{func.__qualname__}: argument '{key}' has dimensions "
                         f"{dict(arg.dimensionality)}, expected {dict(dim)}"
                     )
+                    _log.warning("dimension mismatch: %s", msg)
+                    raise TypeError(msg)
         fast_args = tuple(_to_fast(a) for a in args)
         fast_kwargs = {k: _to_fast(v) for k, v in kwargs.items()}
         _fast_zone.active = True

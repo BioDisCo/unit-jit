@@ -532,11 +532,13 @@ class _UnitInferrer:
                 and hasattr(new_ret, "dimensionality")
                 and self._return.dimensionality != new_ret.dimensionality
             ):
-                raise TypeError(
+                msg = (
                     f"inconsistent return dimensions: "
                     f"{self._return} ({dict(self._return.dimensionality)}) vs "
                     f"{new_ret} ({dict(new_ret.dimensionality)})"
                 )
+                _log.warning("dimension mismatch: %s", msg)
+                raise TypeError(msg)
             self._return = new_ret
         elif isinstance(node, cst.Expr) and isinstance(node.value, cst.Call):
             self._mutation_call(node.value)
@@ -612,11 +614,13 @@ class _UnitInferrer:
                     and hasattr(ret_else, "dimensionality")
                     and ret_then.dimensionality != ret_else.dimensionality
                 ):
-                    raise TypeError(
+                    msg = (
                         f"inconsistent return dimensions across branches: "
                         f"{ret_then} ({dict(ret_then.dimensionality)}) vs "
                         f"{ret_else} ({dict(ret_else.dimensionality)})"
                     )
+                    _log.warning("dimension mismatch: %s", msg)
+                    raise TypeError(msg)
                 self._return = None  # same dimensionality, different scale: no wrapping
         else:
             self._return = ret_then if ret_then is not _SENTINEL else ret_else
@@ -974,10 +978,12 @@ class _UnitInferrer:
                 if left is None or right is None:
                     return left if left is not None else right
                 if left.dimensionality != right.dimensionality:
-                    raise TypeError(
+                    msg = (
                         f"cannot add/subtract {left} and {right}: "
                         f"{dict(left.dimensionality)} vs {dict(right.dimensionality)}"
                     )
+                    _log.warning("dimension mismatch: %s", msg)
+                    raise TypeError(msg)
                 return left
             if isinstance(op, cst.Multiply):
                 return _unit_mul(left, right)
