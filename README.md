@@ -22,7 +22,7 @@ On the first call, `unit-jit` abstract-interprets the function body with the inp
 
 ## Benchmark
 
-Both functions below are identical in structure. `simulate_pint` runs with full Pint overhead on every call; `simulate_fast` runs as plain floats on every call.
+Both functions below are identical in structure. `simulate_pint` runs with full Pint overhead on every call; `simulate_fast` runs as plain floats on every call after the first.
 
 ```python
 import time
@@ -84,11 +84,12 @@ The speedup scales with loop length: the longer the loop, the more Pint overhead
 
 ## How it works
 
-1. **Unit inference**: on the first call, all `@unit_jit` functions in the module are rewritten together. The function body is abstract-interpreted with the input units: dimensional errors (e.g. adding meters to seconds) are caught across all branches at this point, and return units are inferred. If source is unavailable, the function falls back to running as plain Pint on every call.
-2. **Eager snapshot**: Quantity attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is a plain dict lookup.
+1. **Unit inference**: on the first call, all `@unit_jit` functions in the module are rewritten together. The function body is abstract-interpreted with the input units: dimensional errors (e.g. adding meters to seconds) are caught across all branches, and return units are inferred. If source is unavailable, the function falls back to running as plain Pint on every call.
+2. **Eager snapshot**: `Quantity` attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is then a plain dict lookup.
 3. **Fast zone**: a thread-local flag marks the outermost `@unit_jit` frame. Inner `@unit_jit` calls skip boundary conversion entirely.
-4. **Return wrapping**: the SI unit of the return value is determined by abstract interpretation and cached. The registry is captured from the first call's arguments, so results always belong to the same registry that produced them.
-5. **Dimension guard**: argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
+4. **Return wrapping**: the SI unit of the return value is determined by abstract interpretation and cached. For `NamedTuple` returns, each field's unit is tracked independently and the result is reconstructed as the same `NamedTuple` type with all fields wrapped back as `Quantity` objects. The registry is captured from the first call's arguments, so results always belong to the same registry that produced them.
+5. **Lazy callee inference**: when a `@unit_jit` function calls a method that is not yet inferred, including plain (non-decorated) methods and abstract methods implemented in subclasses, the inferrer analyses the callee recursively at inference time to resolve its return unit. The result is not written to global state; it is used only to complete the caller's unit chain.
+6. **Dimension guard**: argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
 
 The right entry point is the **outermost function that owns the hot loop**, not the leaf functions it calls.
 
@@ -155,24 +156,16 @@ path_total(path)   # first call: inference + fast; returns 6.0 m as Quantity
 path_total(path)   # fast
 ```
 
-### Vectorized operations on Quantity arrays
-
 Multiple `Quantity` array arguments work the same way: each is converted to its SI ndarray independently, and the operation runs without any Pint overhead.
 
 ```python
-import numpy as np
-from pint import Quantity, UnitRegistry
-from unit_jit import unit_jit
-
-ureg = UnitRegistry()
-
 @unit_jit
 def speeds(distances: Quantity, times: Quantity) -> Quantity:
     return distances / times
 
 d = np.array([10.0, 20.0, 30.0]) * ureg.m
 t = np.array([2.0,  4.0,  5.0]) * ureg.s
-speeds(d, t)   # first call: inference + fast; returns [5., 5., 6.] m/s as Quantity
+speeds(d, t)   # returns [5., 5., 6.] m/s as Quantity
 ```
 
 ### Class with Quantity attributes
@@ -215,6 +208,83 @@ class Model:
 ```
 
 `simulate` is the entry point: it owns the hot loop and is where boundary conversion happens. `rate` is an inner call, so it receives plain floats directly and its rewritten body runs without any Pint calls.
+
+### NamedTuple return values
+
+A `@unit_jit` function can return a `NamedTuple` of `Quantity` fields. The inferrer tracks each field's unit independently; on the way out, the result is reconstructed as the same `NamedTuple` type with all fields wrapped back as `Quantity` objects.
+
+```python
+from typing import NamedTuple
+
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
+
+class StepResult(NamedTuple):
+    time: Quantity
+    state: Quantity
+
+class Integrator:
+    def __init__(self, dt: Quantity, decay: Quantity) -> None:
+        self.dt = dt
+        self.decay = decay
+
+    @unit_jit
+    def step(self, t: Quantity, x: Quantity) -> StepResult:
+        return StepResult(
+            time=t + self.dt,
+            state=x * (1.0 - self.decay * self.dt),
+        )
+
+sys = Integrator(dt=0.1 * ureg.s, decay=0.5 / ureg.s)
+result = sys.step(0.0 * ureg.s, 1.0 * ureg.mol / ureg.L)
+result.time   # Quantity in [time]
+result.state  # Quantity in [substance / volume]
+```
+
+### Abstract and plain helper methods
+
+`@unit_jit` functions can call methods that are not themselves decorated, including abstract methods whose concrete implementation lives in a subclass. The inferrer analyses the callee lazily at inference time to determine its return unit, without requiring `@unit_jit` on the callee.
+
+```python
+from abc import ABC, abstractmethod
+from typing import cast
+
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
+
+class KineticBase(ABC):
+    def __init__(self, volume: Quantity) -> None:
+        self.volume = volume
+
+    @abstractmethod
+    def propensity(self, n: Quantity) -> Quantity: ...
+
+    @unit_jit
+    def total_rate(self, n: Quantity) -> Quantity:
+        # propensity is abstract here; its return unit is inferred from the
+        # concrete override at inference time
+        return cast("Quantity", self.propensity(n) * self.volume)
+
+class ConcreteModel(KineticBase):
+    def __init__(self, alpha: Quantity, volume: Quantity) -> None:
+        super().__init__(volume)
+        self.alpha = alpha
+
+    def propensity(self, n: Quantity) -> Quantity:  # plain method, no @unit_jit needed
+        return cast("Quantity", self.alpha * n)
+
+model = ConcreteModel(
+    alpha=2.0 / ureg.s / (ureg.mol / ureg.L),
+    volume=1.0 * ureg.L,
+)
+model.total_rate(3.0 * ureg.mol / ureg.L)  # returns Quantity in [volume / time]
+```
+
+The same mechanism applies to plain (non-abstract) helper methods: any method called from within a `@unit_jit` function is analysed lazily if its return unit is not yet known.
 
 ### Pre-compilation with input_args
 
@@ -332,7 +402,26 @@ unit_jit + Numba:   0.01 ms per call  (1687x vs Pint)
 
 The additional 5x on top of unit_jit comes from Numba compiling the inner loop to native code. The gain grows with loop complexity and body size. Numba is imported lazily and only required when `use_numba=True` is set.
 
-`use_numba=True` is not suitable for functions that call other `@unit_jit`-decorated methods internally (e.g. `simulate_model` calling `self.rate`), as Numba cannot compile through the Python wrapper.
+`use_numba=True` requires the rewritten function body to be pure float/NumPy with no calls back into Python-wrapped `@unit_jit` methods, as Numba cannot compile through the Python wrapper. It is best suited for self-contained leaf functions.
+
+## pintrs compatibility
+
+`unit-jit` also works with [pintrs](https://github.com/Borda/pintrs), a Rust-backed drop-in replacement for Pint. No configuration is needed: if pintrs is installed, its `Quantity`, `UnitRegistry`, and `Unit` types are detected automatically alongside pint's.
+
+```python
+import pintrs
+from unit_jit import unit_jit
+
+ureg = pintrs.UnitRegistry()
+
+@unit_jit
+def velocity(d: pintrs.Quantity, t: pintrs.Quantity) -> pintrs.Quantity:
+    return d / t
+
+velocity(10 * ureg.m, 2 * ureg.s)  # returns a pintrs Quantity
+```
+
+The registry is captured from the first call's arguments, so results are always wrapped in the same pintrs registry and interoperate naturally with the rest of your quantities.
 
 ## Running tests
 
