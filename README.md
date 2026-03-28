@@ -3,8 +3,10 @@
 We love explicit tracking of physical units in code, but do not want to pay the runtime overhead in hot loops. `unit-jit` solves this with a single decorator: write your functions against [Pint](https://pint.readthedocs.io) as usual, and let `unit-jit` strip the unit machinery at JIT compile time so every call runs on plain floats.
 
 ```python
-from pint import Quantity
-from unit_jit import unit_jit, ureg
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 @unit_jit
 def velocity(d: Quantity, t: Quantity) -> Quantity:
@@ -26,8 +28,10 @@ Both functions below are identical in structure. `simulate_pint` runs with full 
 import time
 
 import numpy as np
-from pint import Quantity
-from unit_jit import unit_jit, ureg
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 
 @unit_jit
@@ -83,7 +87,7 @@ The speedup scales with loop length: the longer the loop, the more Pint overhead
 1. **Unit inference**: on the first call, all `@unit_jit` functions in the module are rewritten together. The function body is abstract-interpreted with the input units: dimensional errors (e.g. adding meters to seconds) are caught across all branches at this point, and return units are inferred. If source is unavailable, the function falls back to running as plain Pint on every call.
 2. **Eager snapshot**: Quantity attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is a plain dict lookup.
 3. **Fast zone**: a thread-local flag marks the outermost `@unit_jit` frame. Inner `@unit_jit` calls skip boundary conversion entirely.
-4. **Return wrapping**: the SI unit of the return value is determined by abstract interpretation and cached. The registry is captured from the first call's arguments, so results always belong to the same registry that produced them, whether that is `unit_jit.ureg` or a user-supplied one.
+4. **Return wrapping**: the SI unit of the return value is determined by abstract interpretation and cached. The registry is captured from the first call's arguments, so results always belong to the same registry that produced them.
 5. **Dimension guard**: argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
 
 The right entry point is the **outermost function that owns the hot loop**, not the leaf functions it calls.
@@ -113,8 +117,10 @@ The primary use case is a tight loop over scalars. `unit_jit` rewrites the funct
 
 ```python
 import numpy as np
-from pint import Quantity
-from unit_jit import unit_jit, ureg
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 @unit_jit
 def simulate(t: Quantity) -> Quantity:
@@ -135,8 +141,10 @@ When the argument is a `Quantity` wrapping a NumPy array, `unit_jit` converts it
 
 ```python
 import numpy as np
-from pint import Quantity
-from unit_jit import unit_jit, ureg
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 @unit_jit
 def path_total(path: Quantity) -> Quantity:
@@ -153,8 +161,10 @@ Multiple `Quantity` array arguments work the same way: each is converted to its 
 
 ```python
 import numpy as np
-from pint import Quantity
-from unit_jit import unit_jit, ureg
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 @unit_jit
 def speeds(distances: Quantity, times: Quantity) -> Quantity:
@@ -175,8 +185,10 @@ speeds(d, t)   # first call: inference + fast; returns [5., 5., 6.] m/s as Quant
 from dataclasses import dataclass
 
 import numpy as np
-from pint import Quantity
-from unit_jit import unit_jit, ureg
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 @dataclass
 class Params:
@@ -204,35 +216,16 @@ class Model:
 
 `simulate` is the entry point: it owns the hot loop and is where boundary conversion happens. `rate` is an inner call, so it receives plain floats directly and its rewritten body runs without any Pint calls.
 
-### Custom registry
-
-You can use your own `UnitRegistry` instead of `unit_jit.ureg`. The registry is captured from the first call's input arguments, so results are wrapped in the same registry and interoperate naturally with the rest of your quantities.
-
-```python
-from pint import Quantity, UnitRegistry
-from unit_jit import unit_jit
-
-my_ureg = UnitRegistry()
-
-@unit_jit
-def scale(x: Quantity, factor: float) -> Quantity:
-    return x * factor
-
-x = 3.0 * my_ureg.meter
-result = scale(x, 2.0)        # result is a Quantity in my_ureg
-result + 1.0 * my_ureg.meter  # works: same registry
-```
-
-The module-level `ureg` exported by `unit_jit` remains available as a convenience default; there is no requirement to use it.
-
 ### Pre-compilation with input_args
 
 By default, unit inference runs on the first call. Pass `input_args` to the decorator to trigger it at decoration time instead, so every subsequent call is immediately fast.
 
 ```python
 import numpy as np
-from pint import Quantity
-from unit_jit import unit_jit, ureg
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 @unit_jit(input_args=(ureg.m, ureg.s))
 def velocity(d: Quantity, t: Quantity) -> Quantity:
@@ -259,8 +252,10 @@ To inspect what code actually runs after rewriting, use `get_rewritten_source`. 
 
 ```python
 import numpy as np
-from pint import Quantity
-from unit_jit import unit_jit, get_rewritten_source, ureg
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit, get_rewritten_source
+
+ureg = UnitRegistry()
 
 @unit_jit
 def simulate(t: Quantity) -> Quantity:
@@ -303,8 +298,10 @@ For functions with a pure float/NumPy inner loop, `use_numba=True` additionally 
 
 ```python
 import numpy as np
-from pint import Quantity
-from unit_jit import unit_jit, ureg
+from pint import Quantity, UnitRegistry
+from unit_jit import unit_jit
+
+ureg = UnitRegistry()
 
 @unit_jit(use_numba=True)
 def simulate(t: Quantity) -> Quantity:

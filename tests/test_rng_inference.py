@@ -135,7 +135,6 @@ def test_tl_net_change_unit():
 
 def test_tl_net_change_reference_distribution():
     """Empirical mean of net change matches E[births-deaths] = (alpha - delta*x)*dt."""
-    rng = np.random.default_rng(5)
     alpha = 2.0 / ureg.minute / ureg.femtoliter
     delta = 0.1 / ureg.minute
     mrna = 5.0 / ureg.femtoliter
