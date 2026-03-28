@@ -12,10 +12,11 @@ All tests have a plain-Pint reference result that the unit_jit result must match
 within floating-point tolerance.
 """
 
+from typing import cast
+
 import numpy as np
 import pytest
 from pint import Quantity, UnitRegistry
-from typing import cast
 
 from unit_jit import unit_jit
 
@@ -26,10 +27,11 @@ ureg = UnitRegistry()
 # Scalar: (x ** 0.5)
 # ---------------------------------------------------------------------------
 
+
 @unit_jit
 def _sqrt_quantity_scalar(x: Quantity) -> Quantity:
     """Square root of a scalar Quantity: x ** 0.5."""
-    return cast("Quantity", x ** 0.5)
+    return cast("Quantity", x**0.5)
 
 
 def test_sqrt_quantity_scalar_value():
@@ -49,6 +51,7 @@ def test_sqrt_quantity_scalar_unit():
 # Scalar: np.sqrt(x) where x is a Quantity
 # ---------------------------------------------------------------------------
 
+
 @unit_jit
 def _sqrt_np_scalar(x: Quantity) -> Quantity:
     """np.sqrt applied to a Quantity."""
@@ -67,6 +70,7 @@ def test_sqrt_np_scalar_value():
 # This is the exact expression from ChemicalLangevinSystem / CLEOptSystem.
 # ---------------------------------------------------------------------------
 
+
 @unit_jit
 def _cle_noise_amplitude(f: Quantity, V: Quantity, dt: Quantity, z: float) -> Quantity:
     """CLE noise increment: sqrt(f/V) * sqrt(dt) * z.
@@ -77,7 +81,7 @@ def _cle_noise_amplitude(f: Quantity, V: Quantity, dt: Quantity, z: float) -> Qu
 
 
 def test_cle_noise_amplitude_value():
-    f = 2.0 / ureg.minute / ureg.femtoliter   # rate density [1/(min·fL)]
+    f = 2.0 / ureg.minute / ureg.femtoliter  # rate density [1/(min·fL)]
     V = 1.0 * ureg.femtoliter
     dt = 0.1 * ureg.minute
     z = 1.5
@@ -99,6 +103,7 @@ def test_cle_noise_amplitude_unit():
 # ---------------------------------------------------------------------------
 # Batched version: magnitudes are numpy arrays (n,) as in simulate_sde_batch.
 # ---------------------------------------------------------------------------
+
 
 @unit_jit
 def _cle_noise_amplitude_batch(f: Quantity, V: Quantity, dt: Quantity, z: np.ndarray) -> Quantity:
@@ -136,8 +141,11 @@ def test_cle_noise_amplitude_batch_values():
 # sig = ((f_birth + f_death) / V) ** 0.5 * np.sqrt(dt) * z
 # ---------------------------------------------------------------------------
 
+
 @unit_jit
-def _cleopt_noise(f_birth: Quantity, f_death: Quantity, V: Quantity, dt: Quantity, z: float) -> Quantity:
+def _cleopt_noise(
+    f_birth: Quantity, f_death: Quantity, V: Quantity, dt: Quantity, z: float
+) -> Quantity:
     """Combined CLE noise from birth and death reactions."""
     return cast("Quantity", ((f_birth + f_death) / V) ** 0.5 * np.sqrt(dt) * z)
 
@@ -160,8 +168,11 @@ def test_cleopt_noise_value():
 # This tests that unit_jit handles list[Quantity] returns with ** 0.5 inside.
 # ---------------------------------------------------------------------------
 
+
 @unit_jit
-def _cle_noise_list(f_birth: Quantity, f_death: Quantity, V: Quantity, dt: Quantity, z: float) -> list[Quantity]:
+def _cle_noise_list(
+    f_birth: Quantity, f_death: Quantity, V: Quantity, dt: Quantity, z: float
+) -> list[Quantity]:
     """Noise function returning list[Quantity], as in the simulation models."""
     sig = cast("Quantity", ((f_birth + f_death) / V) ** 0.5 * np.sqrt(dt) * z)
     return [sig]

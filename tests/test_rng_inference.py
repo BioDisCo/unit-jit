@@ -21,10 +21,11 @@ noise functions used in our SDE simulations:
     return total_burst / V  # [1/fL]
 """
 
+from typing import cast
+
 import numpy as np
 import pytest
 from pint import Quantity, UnitRegistry
-from typing import cast
 
 from unit_jit import unit_jit
 
@@ -34,6 +35,7 @@ ureg = UnitRegistry()
 # ---------------------------------------------------------------------------
 # rng.poisson: dimensionless count / Quantity volume → Quantity
 # ---------------------------------------------------------------------------
+
 
 @unit_jit
 def _poisson_counts_per_volume(
@@ -50,8 +52,8 @@ def _poisson_counts_per_volume(
 
 def test_poisson_counts_per_volume_unit():
     rng = np.random.default_rng(0)
-    rate   = 1.0 / ureg.minute / ureg.femtoliter
-    dt     = 0.1 * ureg.minute
+    rate = 1.0 / ureg.minute / ureg.femtoliter
+    dt = 0.1 * ureg.minute
     volume = 1.0 * ureg.femtoliter
     result = _poisson_counts_per_volume(rng, rate, dt, volume)
     assert result.dimensionality == {"[length]": -3}
@@ -59,8 +61,8 @@ def test_poisson_counts_per_volume_unit():
 
 def test_poisson_counts_per_volume_nonnegative():
     rng = np.random.default_rng(1)
-    rate   = 1.0 / ureg.minute / ureg.femtoliter
-    dt     = 0.1 * ureg.minute
+    rate = 1.0 / ureg.minute / ureg.femtoliter
+    dt = 0.1 * ureg.minute
     volume = 1.0 * ureg.femtoliter
     result = _poisson_counts_per_volume(rng, rate, dt, volume)
     assert result.magnitude >= 0
@@ -69,6 +71,7 @@ def test_poisson_counts_per_volume_nonnegative():
 # ---------------------------------------------------------------------------
 # rng.binomial: dimensionless count
 # ---------------------------------------------------------------------------
+
 
 @unit_jit
 def _binomial_net_change(
@@ -84,14 +87,14 @@ def _binomial_net_change(
 
 
 def test_binomial_net_change_unit():
-    rng    = np.random.default_rng(2)
+    rng = np.random.default_rng(2)
     volume = 1.0 * ureg.femtoliter
     result = _binomial_net_change(rng, 10, 0.5, volume)
     assert result.dimensionality == {"[length]": -3}
 
 
 def test_binomial_net_change_value_range():
-    rng    = np.random.default_rng(3)
+    rng = np.random.default_rng(3)
     volume = 1.0 * ureg.femtoliter
     result = _binomial_net_change(rng, 10, 0.5, volume)
     assert abs(result.to("1/femtoliter").magnitude) <= 10.0
@@ -100,6 +103,7 @@ def test_binomial_net_change_value_range():
 # ---------------------------------------------------------------------------
 # Tau-leaping pattern: full net-change expression from _tl_net_change
 # ---------------------------------------------------------------------------
+
 
 @unit_jit
 def _tl_net_change(
@@ -112,37 +116,41 @@ def _tl_net_change(
 ) -> Quantity:
     """Net mRNA change via Poisson thinning (births - deaths) / volume."""
     total_rate = (alpha_total + delta * mrna_now) * dt * volume
-    n_events   = rng.poisson(total_rate.magnitude)
+    n_events = rng.poisson(total_rate.magnitude)
     birth_prob = (alpha_total / (alpha_total + delta * mrna_now)).magnitude
-    n_births   = rng.binomial(n_events, birth_prob)
+    n_births = rng.binomial(n_events, birth_prob)
     return cast("Quantity", (n_births - (n_events - n_births)) / volume)
 
 
 def test_tl_net_change_unit():
-    rng   = np.random.default_rng(4)
+    rng = np.random.default_rng(4)
     alpha = 2.0 / ureg.minute / ureg.femtoliter
     delta = 0.1 / ureg.minute
-    mrna  = 5.0 / ureg.femtoliter
-    dt    = 0.1 * ureg.minute
-    V     = 1.0 * ureg.femtoliter
+    mrna = 5.0 / ureg.femtoliter
+    dt = 0.1 * ureg.minute
+    V = 1.0 * ureg.femtoliter
     result = _tl_net_change(rng, alpha, delta, mrna, dt, V)
     assert result.dimensionality == {"[length]": -3}
 
 
 def test_tl_net_change_reference_distribution():
     """Empirical mean of net change matches E[births-deaths] = (alpha - delta*x)*dt."""
-    rng   = np.random.default_rng(5)
+    rng = np.random.default_rng(5)
     alpha = 2.0 / ureg.minute / ureg.femtoliter
     delta = 0.1 / ureg.minute
-    mrna  = 5.0 / ureg.femtoliter
-    dt    = 0.1 * ureg.minute
-    V     = 1.0 * ureg.femtoliter
+    mrna = 5.0 / ureg.femtoliter
+    dt = 0.1 * ureg.minute
+    V = 1.0 * ureg.femtoliter
 
     n_samples = 20_000
-    samples = np.array([
-        _tl_net_change(np.random.default_rng(i), alpha, delta, mrna, dt, V).to("1/femtoliter").magnitude
-        for i in range(n_samples)
-    ])
+    samples = np.array(
+        [
+            _tl_net_change(np.random.default_rng(i), alpha, delta, mrna, dt, V)
+            .to("1/femtoliter")
+            .magnitude
+            for i in range(n_samples)
+        ]
+    )
     expected_mean = ((alpha - delta * mrna) * dt).to("1/femtoliter").magnitude
     assert samples.mean() == pytest.approx(expected_mean, abs=0.05)
 
@@ -150,6 +158,7 @@ def test_tl_net_change_reference_distribution():
 # ---------------------------------------------------------------------------
 # rng.geometric: dimensionless burst sizes
 # ---------------------------------------------------------------------------
+
 
 @unit_jit
 def _geometric_burst(
@@ -164,14 +173,14 @@ def _geometric_burst(
 
 
 def test_geometric_burst_unit():
-    rng    = np.random.default_rng(6)
+    rng = np.random.default_rng(6)
     volume = 1.0 * ureg.femtoliter
     result = _geometric_burst(rng, 5, 0.5, volume)
     assert result.dimensionality == {"[length]": -3}
 
 
 def test_geometric_burst_nonnegative():
-    rng    = np.random.default_rng(7)
+    rng = np.random.default_rng(7)
     volume = 1.0 * ureg.femtoliter
     result = _geometric_burst(rng, 10, 0.3, volume)
     assert result.to("1/femtoliter").magnitude >= 0
@@ -180,6 +189,7 @@ def test_geometric_burst_nonnegative():
 # ---------------------------------------------------------------------------
 # Batch (shape-(n,)) variant: rng.poisson with array-valued expected counts
 # ---------------------------------------------------------------------------
+
 
 @unit_jit
 def _tl_net_change_batch(
@@ -192,31 +202,31 @@ def _tl_net_change_batch(
 ) -> Quantity:
     """Batch version: mrna_now.magnitude has shape (n,)."""
     total_rate = (alpha_total + delta * mrna_now) * dt * volume
-    n_events   = rng.poisson(total_rate.magnitude)
+    n_events = rng.poisson(total_rate.magnitude)
     birth_prob = (alpha_total / (alpha_total + delta * mrna_now)).magnitude
-    n_births   = rng.binomial(n_events, birth_prob)
+    n_births = rng.binomial(n_events, birth_prob)
     return cast("Quantity", (n_births - (n_events - n_births)) / volume)
 
 
 def test_tl_net_change_batch_shape():
-    n     = 100
-    rng   = np.random.default_rng(8)
+    n = 100
+    rng = np.random.default_rng(8)
     alpha = 2.0 / ureg.minute / ureg.femtoliter
     delta = 0.1 / ureg.minute
-    mrna  = np.ones(n) * 5.0 / ureg.femtoliter
-    dt    = 0.1 * ureg.minute
-    V     = 1.0 * ureg.femtoliter
+    mrna = np.ones(n) * 5.0 / ureg.femtoliter
+    dt = 0.1 * ureg.minute
+    V = 1.0 * ureg.femtoliter
     result = _tl_net_change_batch(rng, alpha, delta, mrna, dt, V)
     assert result.to("1/femtoliter").magnitude.shape == (n,)
 
 
 def test_tl_net_change_batch_unit():
-    n     = 50
-    rng   = np.random.default_rng(9)
+    n = 50
+    rng = np.random.default_rng(9)
     alpha = 2.0 / ureg.minute / ureg.femtoliter
     delta = 0.1 / ureg.minute
-    mrna  = np.ones(n) * 3.0 / ureg.femtoliter
-    dt    = 0.1 * ureg.minute
-    V     = 1.0 * ureg.femtoliter
+    mrna = np.ones(n) * 3.0 / ureg.femtoliter
+    dt = 0.1 * ureg.minute
+    V = 1.0 * ureg.femtoliter
     result = _tl_net_change_batch(rng, alpha, delta, mrna, dt, V)
     assert result.dimensionality == {"[length]": -3}

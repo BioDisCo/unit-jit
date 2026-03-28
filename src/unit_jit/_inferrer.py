@@ -14,8 +14,8 @@ import types
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np
 import libcst as cst
+import numpy as np
 from pint import Quantity, Unit, UnitRegistry
 
 
@@ -53,38 +53,40 @@ _SENTINEL: object = object()
 _UNKNOWN: object = object()
 
 # All methods on np.random.Generator that return plain (dimensionless) int/float/ndarray.
-_RNG_DIMENSIONLESS_METHODS: frozenset[str] = frozenset({
-    "poisson",
-    "binomial",
-    "geometric",
-    "negative_binomial",
-    "hypergeometric",
-    "multinomial",
-    "standard_normal",
-    "normal",
-    "exponential",
-    "standard_exponential",
-    "standard_gamma",
-    "standard_t",
-    "uniform",
-    "random",
-    "integers",
-    "choice",
-    "permutation",
-    "shuffle",
-    "rayleigh",
-    "laplace",
-    "logistic",
-    "gumbel",
-    "pareto",
-    "weibull",
-    "power",
-    "vonmises",
-    "beta",
-    "chisquare",
-    "f",
-    "gamma",
-})
+_RNG_DIMENSIONLESS_METHODS: frozenset[str] = frozenset(
+    {
+        "poisson",
+        "binomial",
+        "geometric",
+        "negative_binomial",
+        "hypergeometric",
+        "multinomial",
+        "standard_normal",
+        "normal",
+        "exponential",
+        "standard_exponential",
+        "standard_gamma",
+        "standard_t",
+        "uniform",
+        "random",
+        "integers",
+        "choice",
+        "permutation",
+        "shuffle",
+        "rayleigh",
+        "laplace",
+        "logistic",
+        "gumbel",
+        "pareto",
+        "weibull",
+        "power",
+        "vonmises",
+        "beta",
+        "chisquare",
+        "f",
+        "gamma",
+    }
+)
 
 
 class _ListReturn:
@@ -673,7 +675,10 @@ class _UnitInferrer:
             obj = self.param_objects.get(receiver_name)
             if obj is not None:
                 # np.random.Generator methods always return plain (dimensionless) values.
-                if isinstance(obj, np.random.Generator) and method_name in _RNG_DIMENSIONLESS_METHODS:
+                if (
+                    isinstance(obj, np.random.Generator)
+                    and method_name in _RNG_DIMENSIONLESS_METHODS
+                ):
                     return None
                 obj_qualname = f"{type(obj).__qualname__}.{method_name}"
                 if obj_qualname in self.return_units:
