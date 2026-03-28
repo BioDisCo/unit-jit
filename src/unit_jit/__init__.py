@@ -161,13 +161,17 @@ def _snapshot(obj: Any) -> Any:
         for name, val in getattr(obj, "__dict__", {}).items():
             if isinstance(val, _QUANTITY_TYPES):
                 snap_dict[name] = val.to_base_units().magnitude
+            elif isinstance(val, list):
+                snap_dict[name] = [_snapshot(el) for el in val]
+            elif hasattr(type(val), "_fields") and isinstance(val, tuple):  # NamedTuple
+                snap_dict[name] = _snapshot(val)
+            elif isinstance(val, tuple):
+                snap_dict[name] = tuple(_snapshot(el) for el in val)
             elif (
                 hasattr(val, "__dict__")
                 and not callable(val)
                 and not hasattr(val, "__array_interface__")
             ):
-                snap_dict[name] = _snapshot(val)
-            elif hasattr(type(val), "_fields"):  # nested NamedTuple
                 snap_dict[name] = _snapshot(val)
             else:
                 snap_dict[name] = val
@@ -187,6 +191,8 @@ def _to_fast(arg: Any) -> Any:
         return arg.to_base_units().magnitude
     if isinstance(arg, list):
         return [_to_fast(el) for el in arg]
+    if hasattr(type(arg), "_fields") and isinstance(arg, tuple):  # NamedTuple before plain tuple
+        return type(arg)._make(_to_fast(el) for el in arg)  # type: ignore[attr-defined]
     if isinstance(arg, tuple):
         return tuple(_to_fast(el) for el in arg)
     if isinstance(arg, (int, float, bool, str, bytes, type(None))):
@@ -205,7 +211,7 @@ def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry | None) -> Any:
     enabling list[tuple[Quantity, ...]] and similar return types. Variable-length
     lists are supported by repeating the last inferred element unit.
     """
-    if unit_info is None:
+    if unit_info is None or unit_info is _UNKNOWN:
         return result
     assert wrap_ureg is not None
     if isinstance(unit_info, _ListReturn):
@@ -214,6 +220,8 @@ def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry | None) -> Any:
         if len(units) < n:
             units = list(units) + [units[-1]] * (n - len(units))
         wrapped = [_wrap(r, u, wrap_ureg) for r, u in zip(result, units)]
+        if unit_info.kind == "namedtuple" and unit_info.cls is not None:
+            return unit_info.cls._make(wrapped)  # type: ignore[attr-defined]
         return wrapped if unit_info.kind == "list" else tuple(wrapped)
     if isinstance(unit_info, tuple):
         cls, units = unit_info
@@ -304,16 +312,22 @@ def compile(instance: Any) -> None:  # noqa: A001 (intentional shadow of built-i
         if ann is np.random.Generator or ann == "np.random.Generator":
             return np.random.default_rng(0)
         # Bare Quantity — match by parameter name first to pick the right unit.
-        if ann in _QUANTITY_TYPES or (
+        # Also accept string annotations produced by `from __future__ import annotations`.
+        ann_str = str(ann)
+        _is_bare_quantity = ann in _QUANTITY_TYPES or (
             isinstance(ann, type) and issubclass(ann, tuple(_QUANTITY_TYPES))
-        ):
+        ) or (
+            isinstance(ann, str)
+            and "Quantity" in ann_str
+            and not any(c in ann_str for c in ("Sequence", "list", "List", "["))
+        )
+        if _is_bare_quantity:
             pname = param.name.lower().lstrip("_")
             if pname in ("t", "time", "dt") and hasattr(instance, "time_horizon"):
                 return 1 * instance.time_horizon.units  # type: ignore[operator]
             return qty_pool[0] if qty_pool else None
         # list / Sequence of Quantity — use init_state if available (correct species units),
         # otherwise fall back to the generic qty_list (may have wrong units for some methods).
-        ann_str = str(ann)
         if "Quantity" in ann_str and (
             "Sequence" in ann_str or "list" in ann_str or "List" in ann_str
         ):

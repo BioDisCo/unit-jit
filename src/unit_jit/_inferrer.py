@@ -91,18 +91,20 @@ _RNG_DIMENSIONLESS_METHODS: frozenset[str] = frozenset(
 
 
 class _ListReturn:
-    """Unit info for a function returning list[Quantity] or tuple[Quantity, ...]."""
+    """Unit info for a function returning list[Quantity], tuple[Quantity, ...], or a NamedTuple."""
 
-    __slots__ = ("kind", "units")
+    __slots__ = ("cls", "kind", "units")
 
-    def __init__(self, kind: str, units: list[Any]) -> None:
+    def __init__(self, kind: str, units: list[Any], cls: type | None = None) -> None:
         self.kind = kind
         self.units = units
+        self.cls = cls
 
     def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, _ListReturn)
             and self.kind == other.kind
+            and self.cls is other.cls
             and len(self.units) == len(other.units)
             and all(u1 == u2 for u1, u2 in zip(self.units, other.units))
         )
@@ -225,17 +227,26 @@ def _mul2(us: list[Any]) -> Any:
     return _unit_mul(us[0], us[1]) if len(us) > 1 else _p(us)
 
 
+def _reduce(us: list[Any]) -> Any:
+    """Return element unit when reducing a list (sum/min/max), else first arg unit."""
+    result = us[0] if us else None
+    if isinstance(result, _ListReturn):
+        # sum/min/max collapses a list to its common element unit
+        elems = [u for u in result.units if u is not None and u is not _UNKNOWN]
+        return elems[0] if elems else None
+    return result
+
+
 _KNOWN_CALLS: dict[str, Callable[[list[Any]], Any]] = {
-    # ---- Python builtins ------------------------------------------------
     "abs": _p,
     "round": _p,
     "float": _d,
     "int": _d,
     "bool": _d,
     "len": _d,
-    "sum": _p,
-    "min": _p,
-    "max": _p,
+    "sum": _reduce,
+    "min": _reduce,
+    "max": _reduce,
     # ---- math module ----------------------------------------------------
     "math.sqrt": _sqrt,
     "math.exp": _d,
@@ -412,6 +423,12 @@ def _extract_attr_units(obj: Any) -> dict[str, Any]:
             continue
         if isinstance(v, _QUANTITY_TYPES):
             result[k] = v.to_base_units().units
+        elif isinstance(v, list):
+            elem_units = [
+                el.to_base_units().units if isinstance(el, _QUANTITY_TYPES) else None for el in v
+            ]
+            if any(u is not None for u in elem_units):
+                result[k] = _ListReturn("list", elem_units)
         elif hasattr(type(v), "_fields"):  # nested NamedTuple
             nested = _extract_attr_units(v)
             if nested:
@@ -493,7 +510,18 @@ class _UnitInferrer:
             self._bind(node.target, self._expr(node.value))
         elif isinstance(node, cst.AugAssign):
             lhs = self.env.get(node.target.value) if isinstance(node.target, cst.Name) else None
-            self._bind(node.target, self._binop(node.operator, lhs, self._expr(node.value)))
+            # Map AugAssign operators to their base binary operator counterparts.
+            _aug_to_binop: dict[type, Any] = {
+                cst.AddAssign: cst.Add(),
+                cst.SubtractAssign: cst.Subtract(),
+                cst.MultiplyAssign: cst.Multiply(),
+                cst.DivideAssign: cst.Divide(),
+                cst.FloorDivideAssign: cst.FloorDivide(),
+                cst.PowerAssign: cst.Power(),
+                cst.ModuloAssign: cst.Modulo(),
+            }
+            base_op = _aug_to_binop.get(type(node.operator), node.operator)
+            self._bind(node.target, self._binop(base_op, lhs, self._expr(node.value)))
         elif isinstance(node, cst.Return):
             new_ret = self._expr(node.value) if node.value is not None else None
             if (
@@ -510,6 +538,8 @@ class _UnitInferrer:
                     f"{new_ret} ({dict(new_ret.dimensionality)})"
                 )
             self._return = new_ret
+        elif isinstance(node, cst.Expr) and isinstance(node.value, cst.Call):
+            self._mutation_call(node.value)
 
     def _bind(self, target: Any, unit: Any) -> None:
         if isinstance(target, cst.Name):
@@ -517,6 +547,36 @@ class _UnitInferrer:
         elif isinstance(target, (cst.Tuple, cst.List)):
             for el in target.elements:
                 self._bind(el.value, None)  # conservative: unknown per element
+        elif isinstance(target, cst.Subscript):
+            # Index assignment: x[i] = val → track element type for known list containers.
+            # Only update when already a _ListReturn; do NOT upgrade opaque arrays (unit=None).
+            if isinstance(target.value, cst.Name):
+                var_name = target.value.value
+                existing = self.env.get(var_name)
+                if isinstance(existing, _ListReturn):
+                    self.env[var_name] = _ListReturn(existing.kind, [unit], cls=existing.cls)
+
+    def _mutation_call(self, call: cst.Call) -> None:
+        """Track in-place list mutations (.append, .extend) that alter element types."""
+        if not isinstance(call.func, cst.Attribute) or not isinstance(call.func.value, cst.Name):
+            return
+        var_name = call.func.value.value
+        method = call.func.attr.value
+        existing = self.env.get(var_name)
+        if method == "append" and call.args:
+            elem_unit = self._expr(call.args[0].value)
+            if isinstance(existing, _ListReturn):
+                # Keep existing kind/cls; use the new element unit as representative.
+                self.env[var_name] = _ListReturn(existing.kind, [elem_unit], cls=existing.cls)
+            else:
+                self.env[var_name] = _ListReturn("list", [elem_unit])
+        elif method == "extend" and call.args:
+            iter_unit = self._expr(call.args[0].value)
+            elem_unit = iter_unit.units[0] if isinstance(iter_unit, _ListReturn) and iter_unit.units else None
+            if isinstance(existing, _ListReturn):
+                self.env[var_name] = _ListReturn(existing.kind, [elem_unit], cls=existing.cls)
+            else:
+                self.env[var_name] = _ListReturn("list", [elem_unit])
 
     def _if(self, node: cst.If) -> None:
         env_before, ret_before = dict(self.env), self._return
@@ -589,6 +649,20 @@ class _UnitInferrer:
             return _ListReturn("list", [self._expr(el.value) for el in node.elements])
         if isinstance(node, cst.Tuple):
             return _ListReturn("tuple", [self._expr(el.value) for el in node.elements])
+        if isinstance(node, cst.ListComp):
+            # Infer element unit from the elt expression, with iteration vars in scope.
+            saved_env = dict(self.env)
+            for_in = node.for_in
+            while for_in is not None:
+                iter_unit = self._expr(for_in.iter)
+                # Iteration variable gets element unit of the iterable.
+                elem_unit = iter_unit.units[0] if isinstance(iter_unit, _ListReturn) and iter_unit.units else None
+                if isinstance(for_in.target, cst.Name):
+                    self.env[for_in.target.value] = elem_unit
+                for_in = for_in.inner_for_in
+            elt_unit = self._expr(node.elt)
+            self.env = saved_env
+            return _ListReturn("list", [elt_unit])
         if isinstance(node, cst.Subscript):
             container = self._expr(node.value)
             if isinstance(container, _ListReturn) and node.slice:
@@ -600,6 +674,11 @@ class _UnitInferrer:
                         i = int(idx)
                         if -n <= i < n:
                             return container.units[i]
+                    # Non-literal index: use common unit if all elements agree.
+                    if container.units:
+                        first = container.units[0]
+                        if all(u == first for u in container.units):
+                            return first
                 return None  # unknown index: conservative
             return container
         return None
@@ -705,6 +784,19 @@ class _UnitInferrer:
                     )
                     if lazy is not _UNKNOWN and lazy is not _SENTINEL:
                         return lazy
+                # Fallback: try lazy inference even for non-@unit_jit methods.
+                # This handles plain methods like reaction_rates on model classes.
+                if (
+                    bound_method is not None
+                    and callable(bound_method)
+                    and not getattr(bound_method, "__unit_jit_wrapped__", False)
+                    and obj_qualname not in self._inferring
+                    and not isinstance(obj, np.random.Generator)
+                ):
+                    inner_bound = functools.partial(bound_method, obj)
+                    lazy = self._lazy_infer_callee(inner_bound, obj_qualname, node, arg_units)
+                    if lazy is not _UNKNOWN and lazy is not _SENTINEL:
+                        return lazy
 
         # @unit_jit callee already inferred
         if func_name and func_name in self.module_globals:
@@ -732,6 +824,24 @@ class _UnitInferrer:
             except Exception:
                 return _UNKNOWN
 
+        # NamedTuple constructor: infer each field's unit from positional/keyword args.
+        callee = self.module_globals.get(func_name) if func_name else None
+        if (
+            callee is not None
+            and isinstance(callee, type)
+            and issubclass(callee, tuple)
+            and hasattr(callee, "_fields")
+        ):
+            fields: tuple[str, ...] = callee._fields  # type: ignore[attr-defined]
+            field_units: dict[str, Any] = {}
+            for i, a in enumerate(node.args):
+                unit = self._expr(a.value)
+                if a.keyword is not None:
+                    field_units[a.keyword.value] = unit
+                elif i < len(fields):
+                    field_units[fields[i]] = unit
+            return _ListReturn("namedtuple", [field_units.get(f) for f in fields], cls=callee)
+
         return _UNKNOWN
 
     def _lazy_infer_callee(
@@ -753,10 +863,35 @@ class _UnitInferrer:
             return _UNKNOWN
         reg = next(iter(self.ureg_vars.values()), None)
         if reg is None:
-            # Module has no ureg global; fall back to the registry embedded in a unit object.
+            # Module has no ureg global; search inside _ListReturn units and param_objects too.
+            def _reg_from_unit(u: Any) -> Any:
+                if u is None or u is _UNKNOWN:
+                    return None
+                if isinstance(u, _ListReturn):
+                    for el in u.units:
+                        r = _reg_from_unit(el)
+                        if r is not None:
+                            return r
+                    return None
+                return getattr(u, "_REGISTRY", None)  # noqa: SLF001
+
             for u in arg_units:
-                if u is not None and u is not _UNKNOWN and hasattr(u, "_REGISTRY"):
-                    reg = u._REGISTRY  # noqa: SLF001
+                r = _reg_from_unit(u)
+                if r is not None:
+                    reg = r
+                    break
+        if reg is None:
+            # Also try param_objects (e.g. BCRN instance with Quantity attributes).
+            for obj in self.param_objects.values():
+                try:
+                    for v in vars(obj).values():
+                        if isinstance(v, _QUANTITY_TYPES):
+                            reg = getattr(v, "_REGISTRY", None)  # noqa: SLF001
+                            if reg is not None:
+                                break
+                except TypeError:
+                    pass
+                if reg is not None:
                     break
         if reg is None:
             return _UNKNOWN
@@ -774,7 +909,21 @@ class _UnitInferrer:
                 dummy_args.append(1.0)
             else:
                 try:
-                    dummy_args.append(reg.Quantity(1.0, unit))
+                    if isinstance(unit, _ListReturn):
+                        # Build a list of dummy Quantities matching the inferred element units.
+                        def _make_dummy(u: Any) -> Any:
+                            if u is None or u is _UNKNOWN:
+                                return 1.0
+                            if isinstance(u, _ListReturn):
+                                return [_make_dummy(el) for el in u.units]
+                            try:
+                                return reg.Quantity(1.0, u)
+                            except Exception:
+                                return 1.0
+
+                        dummy_args.append([_make_dummy(el) for el in unit.units])
+                    else:
+                        dummy_args.append(reg.Quantity(1.0, unit))
                 except Exception:
                     dummy_args.append(1.0)
 
@@ -801,6 +950,12 @@ class _UnitInferrer:
         return ""
 
     def _binop(self, op: Any, left: Any, right: Any, right_node: Any = None) -> Any:
+        # List repetition: [expr] * n  →  result keeps same structure as the list.
+        if isinstance(op, cst.Multiply):
+            if isinstance(left, _ListReturn) and (right is None or right is _UNKNOWN):
+                return left
+            if isinstance(right, _ListReturn) and (left is None or left is _UNKNOWN):
+                return right
         if isinstance(left, _ListReturn) or isinstance(right, _ListReturn):
             return _UNKNOWN
         try:
@@ -865,6 +1020,15 @@ def infer_return_units(
     inference cannot be performed (source unavailable, parse error, etc.).
     Raises TypeError for dimensional errors detected in the function body.
     """
+    # Unwrap functools.partial so getsource and signature work on the raw function,
+    # and prepend the bound positional/keyword args to the call arguments.
+    import functools
+
+    while isinstance(func, functools.partial):
+        kwargs = {**func.keywords, **kwargs}
+        args = func.args + args
+        func = func.func
+
     try:
         src = textwrap.dedent(_strip_decorators(inspect.getsource(func)))
         tree = cst.parse_module(src)
@@ -880,6 +1044,8 @@ def infer_return_units(
                 return arg.to_base_units().units
             if isinstance(arg, list):
                 return _ListReturn("list", [_arg_unit(el) for el in arg])
+            if hasattr(type(arg), "_fields") and isinstance(arg, tuple):  # NamedTuple before tuple
+                return _ListReturn("namedtuple", [_arg_unit(el) for el in arg], cls=type(arg))
             if isinstance(arg, tuple):
                 return _ListReturn("tuple", [_arg_unit(el) for el in arg])
             attr_units = _extract_attr_units(arg)
@@ -917,6 +1083,14 @@ def infer_return_units(
                 return getattr(arg, "_REGISTRY", None)  # noqa: SLF001
             if isinstance(arg, (list, tuple)):
                 return next((r for el in arg if (r := _find_reg(el)) is not None), None)
+            # Fall back to scanning object attributes (e.g. a dataclass / BCRN instance).
+            try:
+                for v in vars(arg).values():
+                    r = _find_reg(v)
+                    if r is not None:
+                        return r
+            except TypeError:
+                pass
             return None
 
         reg = next((r for a in args if (r := _find_reg(a)) is not None), None)
