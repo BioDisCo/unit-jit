@@ -66,11 +66,39 @@ def _in_fast_zone() -> bool:
     return getattr(_fast_zone, "active", False)
 
 
+def _eval_numeric_cst(node: cst.BaseExpression) -> float | None:
+    if isinstance(node, cst.Integer):
+        return float(node.value)
+    if isinstance(node, cst.Float):
+        return float(node.value)
+    if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
+        value = _eval_numeric_cst(node.expression)
+        return -value if value is not None else None
+    if isinstance(node, cst.BinaryOperation):
+        left = _eval_numeric_cst(node.left)
+        right = _eval_numeric_cst(node.right)
+        if left is None or right is None:
+            return None
+        if isinstance(node.operator, cst.Add):
+            return left + right
+        if isinstance(node.operator, cst.Subtract):
+            return left - right
+        if isinstance(node.operator, cst.Multiply):
+            return left * right
+        if isinstance(node.operator, cst.Divide):
+            return left / right
+        if isinstance(node.operator, cst.FloorDivide):
+            return left // right
+        if isinstance(node.operator, cst.Power):
+            return left**right
+    return None
+
+
 # CST transformer
 
 
 class _QuantityStripper(cst.CSTTransformer):
-    """Strip .magnitude, .to_base_units(), cast("Quantity", x), and ureg.UNIT -> SI float."""
+    """Strip unit-aware Quantity syntax into float operations for the fast zone."""
 
     def __init__(self, ureg_vars: dict[str, UnitRegistry]) -> None:
         super().__init__()
@@ -80,6 +108,37 @@ class _QuantityStripper(cst.CSTTransformer):
         self, original_node: cst.Attribute, updated_node: cst.Attribute
     ) -> cst.BaseExpression:
         if updated_node.attr.value == "magnitude":
+            # x.to(ureg.UNIT).magnitude -> x / SI_scale(UNIT)
+            if (
+                isinstance(updated_node.value, cst.Call)
+                and isinstance(updated_node.value.func, cst.Attribute)
+                and updated_node.value.func.attr.value == "to"
+                and len(updated_node.value.args) == 1
+            ):
+                unit_arg = updated_node.value.args[0].value
+                scale = _eval_numeric_cst(unit_arg)
+                if scale is not None:
+                    return cst.BinaryOperation(
+                        left=updated_node.value.func.value,
+                        operator=cst.Divide(),
+                        right=cst.Float(repr(float(scale))),
+                    )
+                if isinstance(unit_arg, cst.Attribute) and isinstance(unit_arg.value, cst.Name):
+                    ureg_instance = self._ureg_vars.get(unit_arg.value.value)
+                    if ureg_instance is not None:
+                        try:
+                            si_val = (
+                                (1 * getattr(ureg_instance, unit_arg.attr.value))
+                                .to_base_units()
+                                .magnitude
+                            )
+                            return cst.BinaryOperation(
+                                left=updated_node.value.func.value,
+                                operator=cst.Divide(),
+                                right=cst.Float(repr(float(si_val))),
+                            )
+                        except Exception:
+                            pass
             return updated_node.value
         # ureg.UNIT -> SI float (e.g. ureg.s -> 1.0, ureg.cm -> 0.01)
         if isinstance(updated_node.value, cst.Name):
