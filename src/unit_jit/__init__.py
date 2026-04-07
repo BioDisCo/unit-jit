@@ -94,6 +94,10 @@ def _eval_numeric_cst(node: cst.BaseExpression) -> float | None:
     return None
 
 
+def _unit_jit_rescale_to_magnitude(value: Any, scale: float) -> Any:
+    return value / scale
+
+
 # CST transformer
 
 
@@ -118,10 +122,12 @@ class _QuantityStripper(cst.CSTTransformer):
                 unit_arg = updated_node.value.args[0].value
                 scale = _eval_numeric_cst(unit_arg)
                 if scale is not None:
-                    return cst.BinaryOperation(
-                        left=updated_node.value.func.value,
-                        operator=cst.Divide(),
-                        right=cst.Float(repr(float(scale))),
+                    return cst.Call(
+                        func=cst.Name("_unit_jit_rescale_to_magnitude"),
+                        args=[
+                            cst.Arg(updated_node.value.func.value),
+                            cst.Arg(cst.Float(repr(float(scale)))),
+                        ],
                     )
                 if isinstance(unit_arg, cst.Attribute) and isinstance(unit_arg.value, cst.Name):
                     ureg_instance = self._ureg_vars.get(unit_arg.value.value)
@@ -132,10 +138,12 @@ class _QuantityStripper(cst.CSTTransformer):
                                 .to_base_units()
                                 .magnitude
                             )
-                            return cst.BinaryOperation(
-                                left=updated_node.value.func.value,
-                                operator=cst.Divide(),
-                                right=cst.Float(repr(float(si_val))),
+                            return cst.Call(
+                                func=cst.Name("_unit_jit_rescale_to_magnitude"),
+                                args=[
+                                    cst.Arg(updated_node.value.func.value),
+                                    cst.Arg(cst.Float(repr(float(si_val)))),
+                                ],
                             )
                         except Exception:
                             pass
@@ -299,6 +307,7 @@ def _compile_module(module_name: str) -> None:
     """Rewrite all @unit_jit functions from a module at once."""
     funcs = _registry[module_name]
     module_globals = funcs[0].__globals__
+    module_globals.setdefault("_unit_jit_rescale_to_magnitude", _unit_jit_rescale_to_magnitude)
     ureg_vars = {k: v for k, v in module_globals.items() if isinstance(v, _REGISTRY_TYPES)}
     stripper = _QuantityStripper(ureg_vars)
     fast: dict[str, Callable[..., Any]] = {}

@@ -81,6 +81,11 @@ def _to_inverse_minutes_magnitude(rate: Quantity) -> float:
     return rate.to(1 / ureg.min).magnitude
 
 
+@unit_jit
+def _inverse_of_to_inverse_minutes_magnitude(rate: Quantity) -> float:
+    return 1.0 / rate.to(1 / ureg.min).magnitude
+
+
 def _plain_to_minutes_magnitude(t: Quantity) -> float:
     return t.to(ureg.min).magnitude
 
@@ -91,6 +96,10 @@ def _plain_to_dimensionless_magnitude(x: Quantity, y: Quantity) -> float:
 
 def _plain_to_inverse_minutes_magnitude(rate: Quantity) -> float:
     return rate.to(1 / ureg.min).magnitude
+
+
+def _plain_inverse_of_to_inverse_minutes_magnitude(rate: Quantity) -> float:
+    return 1.0 / rate.to(1 / ureg.min).magnitude
 
 
 def test_to_minutes_magnitude_matches_plain_pint():
@@ -110,6 +119,13 @@ def test_to_inverse_minutes_magnitude_matches_plain_pint():
     rate = 120 / ureg.s
     assert _to_inverse_minutes_magnitude(rate) == pytest.approx(
         _plain_to_inverse_minutes_magnitude(rate)
+    )
+
+
+def test_inverse_of_to_inverse_minutes_magnitude_matches_plain_pint():
+    rate = 120 / ureg.s
+    assert _inverse_of_to_inverse_minutes_magnitude(rate) == pytest.approx(
+        _plain_inverse_of_to_inverse_minutes_magnitude(rate)
     )
 
 
