@@ -124,7 +124,7 @@ def _unit_mul(u1: Any, u2: Any) -> Any:
         return u1
     try:
         return u1 * u2
-    except Exception:
+    except Exception:  # noqa: BLE001 — Pint raises UndefinedUnitError, DimensionalityError, etc.
         return _UNKNOWN
 
 
@@ -140,7 +140,7 @@ def _unit_div(u1: Any, u2: Any) -> Any:
             reg = u2._REGISTRY  # noqa: SLF001
             return (reg.Quantity(1) / reg.Quantity(1, u2)).to_base_units().units
         return u1 / u2
-    except Exception:
+    except Exception:  # noqa: BLE001 — Pint raises UndefinedUnitError, DimensionalityError, etc.
         return _UNKNOWN
 
 
@@ -151,7 +151,7 @@ def _unit_pow(u: Any, exp: float) -> Any:
         return None
     try:
         return u**exp
-    except Exception:
+    except Exception:  # noqa: BLE001 — Pint raises UndefinedUnitError, DimensionalityError, etc.
         return _UNKNOWN
 
 
@@ -411,8 +411,15 @@ _KNOWN_CALLS: dict[str, Callable[[list[Any]], Any]] = {
 # ---------------------------------------------------------------------------
 
 
-def _extract_attr_units(obj: Any) -> dict[str, Any]:
+def _extract_attr_units(obj: Any, _visited: set[int] | None = None) -> dict[str, Any]:
     """Recursively extract Quantity attribute units from an object into a nested dict."""
+    if _visited is None:
+        _visited = set()
+    obj_id = id(obj)
+    if obj_id in _visited:
+        return {}
+    _visited.add(obj_id)
+
     result: dict[str, Any] = {}
     if hasattr(type(obj), "_fields"):  # NamedTuple: use _asdict() since no __dict__
         items = obj._asdict().items()
@@ -430,11 +437,11 @@ def _extract_attr_units(obj: Any) -> dict[str, Any]:
             if any(u is not None for u in elem_units):
                 result[k] = _ListReturn("list", elem_units)
         elif hasattr(type(v), "_fields"):  # nested NamedTuple
-            nested = _extract_attr_units(v)
+            nested = _extract_attr_units(v, _visited)
             if nested:
                 result[k] = nested
         elif hasattr(v, "__dict__") and not callable(v) and not hasattr(v, "__array_interface__"):
-            nested = _extract_attr_units(v)
+            nested = _extract_attr_units(v, _visited)
             if nested:
                 result[k] = nested
     return result
@@ -716,7 +723,7 @@ class _UnitInferrer:
             if reg_inst is not None:
                 try:
                     return (1 * getattr(reg_inst, name)).to_base_units().units
-                except Exception:
+                except Exception:  # noqa: BLE001 — Pint raises varied types for unknown unit names
                     pass
         obj_map = self._get_obj_map(node.value)
         if obj_map is not None:
@@ -942,8 +949,6 @@ class _UnitInferrer:
         self._inferring.add(callee_qualname)
         try:
             inferred, _ = infer_return_units(inner_func, tuple(dummy_args), {}, self.return_units)
-        except TypeError:
-            return _UNKNOWN
         except Exception:
             return _UNKNOWN
         finally:
@@ -1092,11 +1097,17 @@ def infer_return_units(
             # so return unit cannot be determined; JIT will be disabled for this function.
             return _SENTINEL, None
 
+        _find_reg_visited: set[int] = set()
+
         def _find_reg(arg: Any) -> Any:
             if isinstance(arg, _QUANTITY_TYPES):
                 return getattr(arg, "_REGISTRY", None)  # noqa: SLF001
             if isinstance(arg, (list, tuple)):
                 return next((r for el in arg if (r := _find_reg(el)) is not None), None)
+            arg_id = id(arg)
+            if arg_id in _find_reg_visited:
+                return None
+            _find_reg_visited.add(arg_id)
             # Fall back to scanning object attributes (e.g. a dataclass / BCRN instance).
             try:
                 for v in vars(arg).values():

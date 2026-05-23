@@ -98,6 +98,18 @@ def _unit_jit_rescale_to_magnitude(value: Any, scale: float) -> Any:
     return value / scale
 
 
+def _ureg_si_magnitude(ureg_instance: UnitRegistry, unit_name: str) -> float | None:
+    """Return the SI base-unit magnitude of ureg_instance.<unit_name>, or None on failure.
+
+    Pint raises a broad range of exception types (UndefinedUnitError, DimensionalityError,
+    AttributeError, …) for unknown or ill-formed unit names, so the bare except is intentional.
+    """
+    try:
+        return float((1 * getattr(ureg_instance, unit_name)).to_base_units().magnitude)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # CST transformer
 
 
@@ -132,35 +144,23 @@ class _QuantityStripper(cst.CSTTransformer):
                 if isinstance(unit_arg, cst.Attribute) and isinstance(unit_arg.value, cst.Name):
                     ureg_instance = self._ureg_vars.get(unit_arg.value.value)
                     if ureg_instance is not None:
-                        try:
-                            si_val = (
-                                (1 * getattr(ureg_instance, unit_arg.attr.value))
-                                .to_base_units()
-                                .magnitude
-                            )
+                        si_val = _ureg_si_magnitude(ureg_instance, unit_arg.attr.value)
+                        if si_val is not None:
                             return cst.Call(
                                 func=cst.Name("_unit_jit_rescale_to_magnitude"),
                                 args=[
                                     cst.Arg(updated_node.value.func.value),
-                                    cst.Arg(cst.Float(repr(float(si_val)))),
+                                    cst.Arg(cst.Float(repr(si_val))),
                                 ],
                             )
-                        except Exception:
-                            pass
             return updated_node.value
         # ureg.UNIT -> SI float (e.g. ureg.s -> 1.0, ureg.cm -> 0.01)
         if isinstance(updated_node.value, cst.Name):
             ureg_instance = self._ureg_vars.get(updated_node.value.value)
             if ureg_instance is not None:
-                try:
-                    si_val = (
-                        (1 * getattr(ureg_instance, updated_node.attr.value))
-                        .to_base_units()
-                        .magnitude
-                    )
-                    return cst.Float(repr(float(si_val)))
-                except Exception:
-                    pass
+                si_val = _ureg_si_magnitude(ureg_instance, updated_node.attr.value)
+                if si_val is not None:
+                    return cst.Float(repr(si_val))
         return updated_node
 
     def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.BaseExpression:
@@ -224,7 +224,17 @@ def _snapshot(obj: Any) -> Any:
         pass
     try:
         snap = object.__new__(type(obj))
-        snap_dict: dict[str, Any] = {_SNAP_KEY: True}
+    except TypeError:
+        return obj  # C-extension type or abstract class with required constructor args
+    snap_dict: dict[str, Any] = {_SNAP_KEY: True}
+    # Pre-register snap before recursing so that any back-reference (direct
+    # or through a cycle) returns this proxy instead of re-entering _snapshot
+    # for the same object.
+    try:
+        _snapshot_cache[obj] = snap
+    except TypeError:
+        pass
+    try:
         for name, val in getattr(obj, "__dict__", {}).items():
             if isinstance(val, _QUANTITY_TYPES):
                 snap_dict[name] = val.to_base_units().magnitude
@@ -243,13 +253,14 @@ def _snapshot(obj: Any) -> Any:
             else:
                 snap_dict[name] = val
         snap.__dict__.update(snap_dict)
-        try:
-            _snapshot_cache[obj] = snap
-        except TypeError:
-            pass
         return snap
-    except Exception:
-        return obj  # fallback: use original object as-is
+    except Exception:  # noqa: BLE001 — Pint raises varied types; recursive calls may too
+        # Evict any incomplete entry so the next call retries cleanly.
+        try:
+            del _snapshot_cache[obj]
+        except (KeyError, TypeError):
+            pass
+        return obj
 
 
 def _to_fast(arg: Any) -> Any:
