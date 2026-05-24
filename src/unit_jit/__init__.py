@@ -18,9 +18,12 @@ Rewrites applied inside the fast zone:
   - ureg.UNIT           -> SI float (e.g. ureg.s -> 1.0, ureg.cm -> 0.01)
   - arithmetic unchanged (works identically for floats)
 
-Quantity attributes on objects (e.g. self.params.alpha) are handled via an
-eager snapshot: all Quantity attrs are converted to SI floats once at
-boundary entry, so attribute access inside the loop is a plain dict lookup.
+Quantity attributes on objects (e.g. self.params.alpha) are handled via
+in-place stripping: at the outermost boundary, all Pint Quantity attrs are
+replaced with their SI magnitudes directly on the original object.  After
+the call the units are restored, re-wrapping the (now updated) float arrays.
+This makes stateful simulations work correctly: mutations inside the JIT
+loop go to the original object and are visible after the call.
 """
 
 import inspect
@@ -280,6 +283,75 @@ def _to_fast(arg: Any) -> Any:
     if _SNAP_KEY in getattr(arg, "__dict__", {}):
         return arg  # already snapshotted
     return _snapshot(arg)
+
+
+def _strip_inplace(
+    obj: Any, visited: set[int] | None = None
+) -> list[tuple[Any, str, Any, Any]]:
+    """Strip Pint Quantity attrs from obj in-place; return saved list for restoration.
+
+    Each entry is (obj, attr_name, registry, base_units) so _restore_inplace
+    can re-wrap the updated float magnitudes after the JIT call completes.
+    Traverses the object graph recursively; cycles are handled via visited.
+    """
+    if visited is None:
+        visited = set()
+    obj_id = id(obj)
+    if obj_id in visited:
+        return []
+    visited.add(obj_id)
+    saved: list[tuple[Any, str, Any, Any]] = []
+    for name, val in list(getattr(obj, "__dict__", {}).items()):
+        if isinstance(val, _QUANTITY_TYPES):
+            base = val.to_base_units()
+            saved.append((obj, name, val._REGISTRY, base.units))
+            obj.__dict__[name] = base.magnitude
+        elif isinstance(val, list):
+            for el in val:
+                if (
+                    hasattr(el, "__dict__")
+                    and not callable(el)
+                    and not hasattr(el, "__array_interface__")
+                ):
+                    saved.extend(_strip_inplace(el, visited))
+        elif (
+            hasattr(val, "__dict__")
+            and not callable(val)
+            and not hasattr(val, "__array_interface__")
+        ):
+            saved.extend(_strip_inplace(val, visited))
+    return saved
+
+
+def _restore_inplace(saved: list[tuple[Any, str, Any, Any]]) -> None:
+    """Re-wrap float attrs with their original Pint units after a JIT call."""
+    for obj, name, registry, units in reversed(saved):
+        current = obj.__dict__.get(name)
+        if current is not None:
+            try:
+                obj.__dict__[name] = registry.Quantity(current, units)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _prepare_arg(arg: Any, stripped: list[tuple[Any, str, Any, Any]]) -> Any:
+    """At the outer JIT boundary: Quantities -> SI floats; mutable objects -> stripped in-place."""
+    if isinstance(arg, _QUANTITY_TYPES):
+        return arg.to_base_units().magnitude
+    if isinstance(arg, (int, float, bool, str, bytes, type(None))):
+        return arg
+    if hasattr(arg, "__array_interface__"):
+        return arg
+    if hasattr(type(arg), "_fields") and isinstance(arg, tuple):  # NamedTuple
+        return type(arg)._make(_to_fast(el) for el in arg)
+    if isinstance(arg, tuple):
+        return tuple(_to_fast(el) for el in arg)
+    if isinstance(arg, list):
+        return [_to_fast(el) for el in arg]
+    if hasattr(arg, "__dict__") and not callable(arg):
+        stripped.extend(_strip_inplace(arg))
+        return arg  # pass original, now stripped in-place
+    return arg
 
 
 def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry | None) -> Any:
@@ -550,14 +622,21 @@ def unit_jit(
         qualname = func.__qualname__
 
         if _in_fast_zone():
-            # Already in float world: snapshot any objects still carrying
-            # Quantities (e.g. original self via Python's descriptor protocol).
-            fast_args = tuple(_to_fast(a) for a in args)
-            fast_kwargs = {k: _to_fast(v) for k, v in kwargs.items()}
-            return fast_func(*fast_args, **fast_kwargs)
+            import sys; print(f"PATH:FASTZONE {qualname}", file=sys.stderr)
+            # Already in float world: strip any Quantity attrs from mutable objects
+            # in-place (same as the outer boundary) so mutations propagate to the
+            # original, then restore after the call.
+            stripped_inner: list[tuple[Any, str, Any, Any]] = []
+            fast_args = tuple(_prepare_arg(a, stripped_inner) for a in args)
+            fast_kwargs = {k: _prepare_arg(v, stripped_inner) for k, v in kwargs.items()}
+            try:
+                return fast_func(*fast_args, **fast_kwargs)
+            finally:
+                _restore_inplace(stripped_inner)
 
         # Functions where inference failed always run as original Pint (no JIT).
         if qualname in _jit_disabled:
+            import sys; print(f"PATH:DISABLED {qualname}", file=sys.stderr)
             return func(*args, **kwargs)
 
         # Entry point: infer units on first call via abstract interpretation.
@@ -588,6 +667,7 @@ def unit_jit(
                     "(no JIT speedup). Enable debug logging for details.",
                     func.__qualname__,
                 )
+                import sys; print(f"PATH:INFER_FAILED {qualname}", file=sys.stderr)
                 return func(*args, **kwargs)
 
         # Subsequent calls (and first call when inference succeeded): check
@@ -620,13 +700,18 @@ def unit_jit(
                     )
                     _log.warning("dimension mismatch: %s", msg)
                     raise TypeError(msg)
-        fast_args = tuple(_to_fast(a) for a in args)
-        fast_kwargs = {k: _to_fast(v) for k, v in kwargs.items()}
+        stripped: list[tuple[Any, str, Any, Any]] = []
+        fast_args = tuple(_prepare_arg(a, stripped) for a in args)
+        fast_kwargs = {k: _prepare_arg(v, stripped) for k, v in kwargs.items()}
+        import sys; print(f"TRACE {qualname}: stripped={[(type(o).__name__, n, o.__dict__.get(n)) for o,n,r,u in stripped]}", file=sys.stderr)
         _fast_zone.active = True
         try:
             raw = fast_func(*fast_args, **fast_kwargs)
         finally:
             _fast_zone.active = False
+            import sys; print(f"TRACE {qualname} post-fast: stripped={[(type(o).__name__, n, o.__dict__.get(n)) for o,n,r,u in stripped]}", file=sys.stderr)
+            _restore_inplace(stripped)
+        import sys; print(f"TRACE {qualname} post-restore: stripped={[(type(o).__name__, n, o.__dict__.get(n)) for o,n,r,u in stripped]}", file=sys.stderr)
         return _wrap(raw, _return_units[qualname], _return_registry[qualname])
 
     wrapper.__name__ = func.__name__
