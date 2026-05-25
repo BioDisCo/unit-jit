@@ -13,6 +13,7 @@ license = { text = "Apache-2.0" }
 dependencies = [
     "pint>=0.24",
     "libcst>=1.4",
+    "numpy>=2.4.3",
 ]
 
 [project.optional-dependencies]
@@ -42,3 +43,8 @@ venvPath = "."
 venv = ".venv"
 extraPaths = ["src"]
 exclude = ["tests", "examples", "benchmarks", ".venv"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

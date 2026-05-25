@@ -17,15 +17,20 @@ ureg = UnitRegistry()
 def _jit_active(func: object) -> bool:
     """Return True if JIT is active for func (inference succeeded, fast path used)."""
     qualname = getattr(func, "__qualname__", None)
-    return (
-        qualname is not None and qualname in _uj._return_units and qualname not in _uj._jit_disabled
-    )
+    if qualname is None:
+        return False
+    module = getattr(func, "__module__", None)
+    key = f"{module}::{qualname}"
+    return key in _uj._return_units and key not in _uj._jit_disabled
 
 
 def _jit_disabled(func: object) -> bool:
     """Return True if JIT was disabled for func (inference failed)."""
     qualname = getattr(func, "__qualname__", None)
-    return qualname is not None and qualname in _uj._jit_disabled
+    if qualname is None:
+        return False
+    module = getattr(func, "__module__", None)
+    return f"{module}::{qualname}" in _uj._jit_disabled
 
 
 # Basic scalar function

@@ -144,9 +144,9 @@ def test_plain_override_dimension():
 def test_jit_override_jit_active():
     sys = _make_sys(_ConcreteJit)
     sys.total_rate(1.0 * ureg.mol / ureg.L)
-    qualname = sys.total_rate.__qualname__
-    assert qualname in _uj._return_units
-    assert qualname not in _uj._jit_disabled
+    key = f"{sys.total_rate.__module__}::{sys.total_rate.__qualname__}"
+    assert key in _uj._return_units
+    assert key not in _uj._jit_disabled
 
 
 # ---------------------------------------------------------------------------
@@ -183,9 +183,9 @@ class _AutoCompileConcrete(_AutoCompileBase):
 def test_auto_compile_jit_active_before_first_call():
     """JIT pre-warmed by __init_subclass__: no call needed."""
     sys = _AutoCompileConcrete(factor=2.0 * ureg.s)
-    qualname = sys.scale.__qualname__
-    assert qualname in _uj._return_units, "scale() should be pre-compiled by __init_subclass__"
-    assert qualname not in _uj._jit_disabled
+    key = f"{sys.scale.__module__}::{sys.scale.__qualname__}"
+    assert key in _uj._return_units, "scale() should be pre-compiled by __init_subclass__"
+    assert key not in _uj._jit_disabled
 
 
 def test_auto_compile_result_correct():

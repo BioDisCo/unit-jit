@@ -495,7 +495,8 @@ def compile(instance: Any) -> None:  # noqa: A001 (intentional shadow of built-i
         if method is None or not getattr(method, "__unit_jit_wrapped__", False):
             continue
         qualname = method.__qualname__
-        if qualname in _return_units or qualname in _jit_disabled:
+        key = f"{method.__module__}::{qualname}"
+        if key in _return_units or key in _jit_disabled:
             continue  # already compiled
         inner_func = getattr(method, "__wrapped__", None)
         if inner_func is None:
@@ -620,9 +621,11 @@ def unit_jit(
 
         fast_func: Callable[..., Any] = _compiled[module_name].get(func.__qualname__, func)  # type: ignore[assignment]
         qualname = func.__qualname__
+        # Use a module-qualified key so functions with identical __qualname__ in
+        # different modules do not collide in the shared state dicts.
+        key = f"{module_name}::{qualname}"
 
         if _in_fast_zone():
-            import sys; print(f"PATH:FASTZONE {qualname}", file=sys.stderr)
             # Already in float world: strip any Quantity attrs from mutable objects
             # in-place (same as the outer boundary) so mutations propagate to the
             # original, then restore after the call.
@@ -635,13 +638,12 @@ def unit_jit(
                 _restore_inplace(stripped_inner)
 
         # Functions where inference failed always run as original Pint (no JIT).
-        if qualname in _jit_disabled:
-            import sys; print(f"PATH:DISABLED {qualname}", file=sys.stderr)
+        if key in _jit_disabled:
             return func(*args, **kwargs)
 
         # Entry point: infer units on first call via abstract interpretation.
-        if qualname not in _return_units:
-            _arg_dims[qualname] = (
+        if key not in _return_units:
+            _arg_dims[key] = (
                 [a.dimensionality if isinstance(a, _QUANTITY_TYPES) else None for a in args],
                 {
                     k: v.dimensionality if isinstance(v, _QUANTITY_TYPES) else None
@@ -650,31 +652,30 @@ def unit_jit(
             )
             inferred_info, inferred_reg = infer_return_units(func, args, kwargs, _return_units)
             if inferred_info is not _SENTINEL:
-                _return_units[qualname] = inferred_info
+                _return_units[key] = inferred_info
                 if inferred_info is not None and inferred_reg is None:
                     raise RuntimeError(
                         f"'{func.__qualname__}': could not determine a UnitRegistry from "
                         "arguments or module globals; pass Quantity arguments or define "
                         "ureg = UnitRegistry() at module level."
                     )
-                _return_registry[qualname] = inferred_reg
+                _return_registry[key] = inferred_reg
                 # Fall through to fast path below.
             else:
                 # Inference failed: disable JIT for this function permanently.
-                _jit_disabled.add(qualname)
+                _jit_disabled.add(key)
                 _log.warning(
                     "'%s': unit inference failed; running as plain Pint on every call "
                     "(no JIT speedup). Enable debug logging for details.",
                     func.__qualname__,
                 )
-                import sys; print(f"PATH:INFER_FAILED {qualname}", file=sys.stderr)
                 return func(*args, **kwargs)
 
         # Subsequent calls (and first call when inference succeeded): check
         # dimensions, convert, run fast version, wrap result.
         # Dimension check: skipped when inference failed to record arg dims (no _arg_dims entry).
-        if qualname in _arg_dims:
-            pos_dims, kw_dims = _arg_dims[qualname]
+        if key in _arg_dims:
+            pos_dims, kw_dims = _arg_dims[key]
             for i, (arg, dim) in enumerate(zip(args, pos_dims)):
                 if (
                     dim is not None
@@ -687,15 +688,15 @@ def unit_jit(
                     )
                     _log.warning("dimension mismatch: %s", msg)
                     raise TypeError(msg)
-            for key, dim in kw_dims.items():
-                arg: Any = kwargs.get(key)
+            for kw_key, dim in kw_dims.items():
+                arg: Any = kwargs.get(kw_key)
                 if (
                     dim is not None
                     and isinstance(arg, _QUANTITY_TYPES)
                     and arg.dimensionality != dim
                 ):
                     msg = (
-                        f"{func.__qualname__}: argument '{key}' has dimensions "
+                        f"{func.__qualname__}: argument '{kw_key}' has dimensions "
                         f"{dict(arg.dimensionality)}, expected {dict(dim)}"
                     )
                     _log.warning("dimension mismatch: %s", msg)
@@ -703,16 +704,13 @@ def unit_jit(
         stripped: list[tuple[Any, str, Any, Any]] = []
         fast_args = tuple(_prepare_arg(a, stripped) for a in args)
         fast_kwargs = {k: _prepare_arg(v, stripped) for k, v in kwargs.items()}
-        import sys; print(f"TRACE {qualname}: stripped={[(type(o).__name__, n, o.__dict__.get(n)) for o,n,r,u in stripped]}", file=sys.stderr)
         _fast_zone.active = True
         try:
             raw = fast_func(*fast_args, **fast_kwargs)
         finally:
             _fast_zone.active = False
-            import sys; print(f"TRACE {qualname} post-fast: stripped={[(type(o).__name__, n, o.__dict__.get(n)) for o,n,r,u in stripped]}", file=sys.stderr)
             _restore_inplace(stripped)
-        import sys; print(f"TRACE {qualname} post-restore: stripped={[(type(o).__name__, n, o.__dict__.get(n)) for o,n,r,u in stripped]}", file=sys.stderr)
-        return _wrap(raw, _return_units[qualname], _return_registry[qualname])
+        return _wrap(raw, _return_units[key], _return_registry[key])
 
     wrapper.__name__ = func.__name__
     wrapper.__qualname__ = func.__qualname__
