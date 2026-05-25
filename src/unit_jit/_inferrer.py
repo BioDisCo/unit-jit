@@ -728,6 +728,18 @@ class _UnitInferrer:
         obj_map = self._get_obj_map(node.value)
         if obj_map is not None:
             return obj_map.get(name)
+        value_unit = self._expr(node.value)
+        if (
+            isinstance(value_unit, _ListReturn)
+            and value_unit.kind == "namedtuple"
+            and value_unit.cls is not None
+            and hasattr(value_unit.cls, "_fields")
+        ):
+            fields: tuple[str, ...] = value_unit.cls._fields  # type: ignore[attr-defined]
+            try:
+                return value_unit.units[fields.index(name)]
+            except ValueError:
+                return None
         return None
 
     def _call(self, node: cst.Call) -> Any:

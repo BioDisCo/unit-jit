@@ -8,7 +8,6 @@ pre-call Pint state.  Each test below verifies that:
 """
 
 import numpy as np
-import pytest
 from pint import Quantity, UnitRegistry
 
 from unit_jit import unit_jit

@@ -480,6 +480,6 @@ def test_namedtuple_params_jit_active():
     params = _NTParams(alpha=alpha, delta=delta)
     model = _ModelWithNamedTupleParams(params)
     model.run(3.0 * ureg.mol / ureg.L)
-    qualname = model.run.__qualname__
-    assert qualname in _uj._return_units
-    assert qualname not in _uj._jit_disabled
+    key = f"{model.run.__module__}::{model.run.__qualname__}"
+    assert key in _uj._return_units
+    assert key not in _uj._jit_disabled

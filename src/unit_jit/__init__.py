@@ -64,6 +64,9 @@ _return_registry: dict[str, UnitRegistry | None] = {}  # qualname -> registry us
 _jit_disabled: set[str] = set()  # qualnames where inference failed: always run original
 _snapshot_cache: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
 
+# Sentinel used in the saved list to signal a NamedTuple restore (see _strip_inplace).
+_NT_RESTORE: object = object()
+
 
 def _in_fast_zone() -> bool:
     return getattr(_fast_zone, "active", False)
@@ -285,13 +288,15 @@ def _to_fast(arg: Any) -> Any:
     return _snapshot(arg)
 
 
-def _strip_inplace(
-    obj: Any, visited: set[int] | None = None
-) -> list[tuple[Any, str, Any, Any]]:
+def _strip_inplace(obj: Any, visited: set[int] | None = None) -> list[tuple[Any, str, Any, Any]]:
     """Strip Pint Quantity attrs from obj in-place; return saved list for restoration.
 
-    Each entry is (obj, attr_name, registry, base_units) so _restore_inplace
-    can re-wrap the updated float magnitudes after the JIT call completes.
+    Each entry is either:
+      (obj, name, registry, base_units)  — Pint Quantity: restore by re-wrapping
+      (obj, name, _NT_RESTORE, original) — NamedTuple: restore by direct assignment
+
+    NamedTuples are immutable, so we replace the attribute on the parent object with
+    a new NamedTuple whose Pint fields have been stripped to SI floats.
     Traverses the object graph recursively; cycles are handled via visited.
     """
     if visited is None:
@@ -306,6 +311,14 @@ def _strip_inplace(
             base = val.to_base_units()
             saved.append((obj, name, val._REGISTRY, base.units))
             obj.__dict__[name] = base.magnitude
+        elif hasattr(type(val), "_fields") and isinstance(val, tuple):
+            # NamedTuple: fields are immutable tuple slots, not writable via __dict__.
+            # Build a new NamedTuple with Pint fields stripped, replace on parent.
+            new_fields = [
+                f.to_base_units().magnitude if isinstance(f, _QUANTITY_TYPES) else f for f in val
+            ]
+            saved.append((obj, name, _NT_RESTORE, val))
+            obj.__dict__[name] = type(val)._make(new_fields)  # type: ignore[attr-defined]
         elif isinstance(val, list):
             for el in val:
                 if (
@@ -326,6 +339,9 @@ def _strip_inplace(
 def _restore_inplace(saved: list[tuple[Any, str, Any, Any]]) -> None:
     """Re-wrap float attrs with their original Pint units after a JIT call."""
     for obj, name, registry, units in reversed(saved):
+        if registry is _NT_RESTORE:
+            obj.__dict__[name] = units  # units slot holds the original NamedTuple
+            continue
         current = obj.__dict__.get(name)
         if current is not None:
             try:
@@ -343,7 +359,7 @@ def _prepare_arg(arg: Any, stripped: list[tuple[Any, str, Any, Any]]) -> Any:
     if hasattr(arg, "__array_interface__"):
         return arg
     if hasattr(type(arg), "_fields") and isinstance(arg, tuple):  # NamedTuple
-        return type(arg)._make(_to_fast(el) for el in arg)
+        return type(arg)._make(_to_fast(el) for el in arg)  # type: ignore[attr-defined]
     if isinstance(arg, tuple):
         return tuple(_to_fast(el) for el in arg)
     if isinstance(arg, list):
@@ -406,10 +422,15 @@ def _compile_module(module_name: str) -> None:
             exec(new_src, module_globals, namespace)
             rewritten = namespace[func.__name__]
             if func.__qualname__ in _use_numba:
-                import numba as _numba  # lazy: only when use_numba=True
-
-                rewritten = _numba.jit(nopython=True)(rewritten)
-                _log.debug("applied numba.jit to '%s'", func.__name__)
+                try:
+                    import numba as _numba  # lazy: only when use_numba=True
+                except ImportError:
+                    _log.warning(
+                        "numba not installed; '%s' will run without Numba JIT", func.__name__
+                    )
+                else:
+                    rewritten = _numba.jit(nopython=True)(rewritten)
+                    _log.debug("applied numba.jit to '%s'", func.__name__)
             fast[func.__qualname__] = rewritten
             _rewritten_src[func.__qualname__] = new_src
             if new_src != src:
