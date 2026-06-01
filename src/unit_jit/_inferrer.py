@@ -13,7 +13,7 @@ import logging
 import textwrap
 import types
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import libcst as cst
 import numpy as np
@@ -511,6 +511,10 @@ class _UnitInferrer:
         self._block(func_node.body.body)
         return self._return
 
+    def infer_lambda(self, lambda_node: cst.Lambda) -> Any:
+        """Return the inferred unit of a lambda's body expression (its implicit return)."""
+        return self._expr(lambda_node.body)
+
     # Statement dispatch
 
     def _block(self, stmts: Any) -> None:
@@ -580,6 +584,7 @@ class _UnitInferrer:
             self._return = new_ret
         elif isinstance(node, cst.Expr) and isinstance(node.value, cst.Call):
             self._mutation_call(node.value)
+            self._expr(node.value)  # catch dimensional errors in standalone calls
 
     def _bind(self, target: Any, unit: Any) -> None:
         if isinstance(target, cst.Name):
@@ -731,6 +736,8 @@ class _UnitInferrer:
                             return first
                 return None  # unknown index: conservative
             return container
+        if isinstance(node, cst.Lambda):
+            return _LambdaNode(node)
         return None
 
     def _get_obj_map(self, node: Any) -> dict[str, Any] | None:
@@ -880,6 +887,12 @@ class _UnitInferrer:
                 if lazy is not _UNKNOWN and lazy is not _SENTINEL:
                     return lazy
 
+        # Lambda stored in env from an assignment — infer it with the call-site args.
+        if isinstance(node.func, cst.Name):
+            env_val = self.env.get(node.func.value)
+            if isinstance(env_val, _LambdaNode):
+                return self._infer_stored_lambda(env_val.node, node)
+
         if func_name in _KNOWN_CALLS:
             try:
                 return _KNOWN_CALLS[func_name](arg_units)
@@ -907,6 +920,38 @@ class _UnitInferrer:
             return _ListReturn("namedtuple", [field_units.get(f) for f in fields], cls=callee)
 
         return _UNKNOWN
+
+    def _infer_stored_lambda(self, lambda_node: cst.Lambda, call_node: cst.Call) -> Any:
+        """Infer the return unit of a lambda stored in a local variable at the call site.
+
+        Binds the lambda's parameters to the call-site argument units (positional from
+        call_node, defaults from the lambda's default-value CST nodes evaluated in the
+        current env), then evaluates the lambda body in that child scope.
+        """
+        pos_units = [self._expr(a.value) for a in call_node.args if a.keyword is None]
+        kw_units = {
+            a.keyword.value: self._expr(a.value)
+            for a in call_node.args
+            if a.keyword is not None
+        }
+
+        child_env = dict(self.env)
+        for i, param in enumerate(lambda_node.params.params):
+            pname = param.name.value
+            if pname in kw_units:
+                child_env[pname] = kw_units[pname]
+            elif i < len(pos_units):
+                child_env[pname] = pos_units[i]
+            elif param.default is not None:
+                # Default is a CST expression in the enclosing scope — evaluate it there.
+                child_env[pname] = self._expr(param.default)
+
+        saved_env = self.env
+        self.env = child_env
+        try:
+            return self._expr(lambda_node.body)
+        finally:
+            self.env = saved_env
 
     def _lazy_infer_callee(
         self,
@@ -1066,6 +1111,30 @@ def _strip_decorators(src: str) -> str:
     return "\n".join(lines)
 
 
+class _LambdaFinder(cst.CSTTransformer):
+    """Collect the first Lambda node in a parsed source fragment (read-only use)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.node: cst.Lambda | None = None
+
+    def visit_Lambda(self, node: cst.Lambda) -> bool:
+        if self.node is None:
+            self.node = node
+        return False  # do not descend into nested lambdas
+
+
+def _find_lambda(tree: cst.Module) -> cst.Lambda | None:
+    """Return the first Lambda in *tree*, or None.
+
+    Used when a callable's source is not a standalone ``def`` (e.g. a lambda stored
+    in a list or assigned to a subscript); inference then runs over the lambda body.
+    """
+    finder = _LambdaFinder()
+    tree.visit(finder)
+    return finder.node
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1096,9 +1165,15 @@ def infer_return_units(
     try:
         src = textwrap.dedent(_strip_decorators(inspect.getsource(func)))
         tree = cst.parse_module(src)
-        if not tree.body or not isinstance(tree.body[0], cst.FunctionDef):
-            return _SENTINEL, None
-        func_node = tree.body[0]
+        func_node: cst.FunctionDef | None = None
+        lambda_node: cst.Lambda | None = None
+        if tree.body and isinstance(tree.body[0], cst.FunctionDef):
+            func_node = tree.body[0]
+        else:
+            # Not a standalone def (e.g. a lambda assigned to a subscript): infer its body.
+            lambda_node = _find_lambda(tree)
+            if lambda_node is None:
+                return _SENTINEL, None
 
         sig = inspect.signature(func)
         param_names = list(sig.parameters.keys())
@@ -1130,8 +1205,19 @@ def infer_return_units(
             {name: arg for name, arg in kwargs.items() if not isinstance(arg, _QUANTITY_TYPES)}
         )
 
-        inferred = _UnitInferrer(env, ureg_vars, module_globals, return_units, param_objects).infer(
-            func_node
+        # Bind parameters supplied only via their default value (e.g. `scale=ureg.m`
+        # in a lambda), so Quantity defaults are visible to inference.
+        for pname, param in sig.parameters.items():
+            if pname not in env and param.default is not inspect.Parameter.empty:
+                env[pname] = _arg_unit(param.default)
+                if not isinstance(param.default, _QUANTITY_TYPES):
+                    param_objects.setdefault(pname, param.default)
+
+        inferrer = _UnitInferrer(env, ureg_vars, module_globals, return_units, param_objects)
+        inferred = (
+            inferrer.infer(func_node)
+            if func_node is not None
+            else inferrer.infer_lambda(cast("cst.Lambda", lambda_node))
         )
 
         if inferred is _SENTINEL:
