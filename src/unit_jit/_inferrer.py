@@ -211,6 +211,25 @@ def _d(_: list[Any]) -> Any:
     return None  # dimensionless
 
 
+def _dimensionless_in(us: list[Any]) -> Any:
+    """Transcendental functions: argument must be dimensionless, result is dimensionless.
+
+    Unlike _d, this verifies the argument carries no dimensions (e.g. catches
+    math.exp(length / time)), then reports a dimensionless result.
+    """
+    for u in us:
+        if (
+            u is not None
+            and u is not _UNKNOWN
+            and getattr(u, "dimensionality", None) is not None
+            and len(u.dimensionality) != 0
+        ):
+            msg = f"transcendental function requires a dimensionless argument, got '{u}'"
+            _log.warning("dimension mismatch: %s", msg)
+            raise TypeError(msg)
+    return None
+
+
 def _sqrt(us: list[Any]) -> Any:
     return _unit_pow(us[0], 0.5) if us else None
 
@@ -404,6 +423,18 @@ _KNOWN_CALLS: dict[str, Callable[[list[Any]], Any]] = {
     "np.fromiter": _d,
     "np.fromfunction": _d,
 }
+
+# Transcendental functions: dimensionless result *and* a required dimensionless argument.
+# (atan2/arctan2/hypot take ratio-like args of matching dimension and are left as-is.)
+for _transcendental in (
+    "math.exp", "math.expm1", "math.log", "math.log2", "math.log10", "math.log1p",
+    "math.sin", "math.cos", "math.tan", "math.asin", "math.acos", "math.atan",
+    "math.sinh", "math.cosh", "math.tanh",
+    "np.exp", "np.expm1", "np.log", "np.log2", "np.log10", "np.log1p",
+    "np.sin", "np.cos", "np.tan", "np.arcsin", "np.arccos", "np.arctan",
+    "np.sinh", "np.cosh", "np.tanh", "np.arcsinh", "np.arccosh", "np.arctanh",
+):
+    _KNOWN_CALLS[_transcendental] = _dimensionless_in
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +883,8 @@ class _UnitInferrer:
         if func_name in _KNOWN_CALLS:
             try:
                 return _KNOWN_CALLS[func_name](arg_units)
+            except TypeError:
+                raise  # dimensional error (e.g. exp of a dimensional arg): propagate
             except Exception:
                 return _UNKNOWN
 
