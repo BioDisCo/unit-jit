@@ -110,6 +110,15 @@ class _ListReturn:
         )
 
 
+class _LambdaNode:
+    """Carries a lambda CST node through the env for call-site inference."""
+
+    __slots__ = ("node",)
+
+    def __init__(self, node: cst.Lambda) -> None:
+        self.node = node
+
+
 # ---------------------------------------------------------------------------
 # Unit arithmetic helpers
 # ---------------------------------------------------------------------------
