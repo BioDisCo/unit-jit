@@ -4,6 +4,7 @@ from typing import cast
 
 import numpy as np
 import pytest
+from _jit_state import jit_active
 from pint import Quantity, UnitRegistry
 
 from unit_jit import unit_jit
@@ -141,3 +142,26 @@ def test_weighted_sum_value():
     result = _weighted_sum(vals, w)
     expected = float(np.dot(vals.to_base_units().magnitude, w))
     assert abs(result.to_base_units().magnitude - expected) < 1e-12
+
+
+# JIT is actually compiled (not silently falling back to plain Pint)
+
+
+def test_vec_div_jit_active():
+    _vec_div(np.array([3.0, 4.0]) * ureg.m, 2.0 * ureg.s)  # warm-up
+    assert jit_active(_vec_div)
+
+
+def test_l2_norm_jit_active():
+    _l2_norm(np.array([3.0, 4.0]) * ureg.m)  # warm-up
+    assert jit_active(_l2_norm)
+
+
+def test_scale_plain_jit_active():
+    _scale_plain(np.array([1.0, 2.0, 3.0]), 2.0)  # warm-up
+    assert jit_active(_scale_plain)
+
+
+def test_weighted_sum_jit_active():
+    _weighted_sum(np.array([1.0, 2.0, 3.0]) * ureg.m, np.array([0.5, 0.3, 0.2]))  # warm-up
+    assert jit_active(_weighted_sum)

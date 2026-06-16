@@ -362,6 +362,24 @@ All `ureg` unit references are replaced by their SI float values (`ureg.nmol / u
 
 `get_rewritten_source` shows only what runs in the rewritten version. The boundary is not shown: arguments arrive as plain SI floats (so `t` is a float in seconds, not a `Quantity`), and the raw return value is wrapped back into a `Quantity` by the runtime using the inferred units.
 
+### Checking that a function is actually JIT-compiled
+
+When unit inference fails, `unit_jit` logs a warning and silently falls back to plain Pint on every call: results stay correct, but the speedup is lost. Use `is_jit_active` and `is_jit_disabled` to assert that hot paths are genuinely accelerated.
+
+```python
+from unit_jit import unit_jit, is_jit_active, is_jit_disabled
+
+@unit_jit
+def rate(d: Quantity, t: Quantity) -> Quantity:
+    return d / t
+
+rate(10 * ureg.m, 2 * ureg.s)   # first call triggers inference and compilation
+assert is_jit_active(rate)      # True: running on the fast path
+assert not is_jit_disabled(rate)
+```
+
+Both predicates read runtime state only and never trigger compilation. A function acquires this state on its first call (or at decoration time when `input_args` is given), so both return `False` for a `@unit_jit` function that has not yet been called. If inference fails, `is_jit_active` returns `False` and `is_jit_disabled` returns `True`.
+
 ## Numba integration
 
 For functions with a pure float/NumPy inner loop, `use_numba=True` additionally compiles the rewritten function with [Numba](https://numba.readthedocs.io), giving a further speedup on top of the Pint stripping.

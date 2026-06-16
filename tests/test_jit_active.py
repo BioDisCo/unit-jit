@@ -6,31 +6,14 @@ These tests check the internal state to confirm that:
 """
 
 import pytest
+from _jit_state import jit_active as _jit_active
+from _jit_state import jit_disabled as _jit_disabled
 from pint import Quantity, UnitRegistry
 
 import unit_jit as _uj
 from unit_jit import get_rewritten_source, unit_jit
 
 ureg = UnitRegistry()
-
-
-def _jit_active(func: object) -> bool:
-    """Return True if JIT is active for func (inference succeeded, fast path used)."""
-    qualname = getattr(func, "__qualname__", None)
-    if qualname is None:
-        return False
-    module = getattr(func, "__module__", None)
-    key = f"{module}::{qualname}"
-    return key in _uj._return_units and key not in _uj._jit_disabled
-
-
-def _jit_disabled(func: object) -> bool:
-    """Return True if JIT was disabled for func (inference failed)."""
-    qualname = getattr(func, "__qualname__", None)
-    if qualname is None:
-        return False
-    module = getattr(func, "__module__", None)
-    return f"{module}::{qualname}" in _uj._jit_disabled
 
 
 # Basic scalar function
@@ -248,6 +231,15 @@ def test_init_subclass_fast_path_matches_pint():
 
 
 # JIT disabled when inference fails (source not inspectable)
+
+
+def test_public_predicates_match_state():
+    """The public is_jit_active / is_jit_disabled names track real runtime state."""
+    from unit_jit import is_jit_active, is_jit_disabled
+
+    _scalar(10 * ureg.m, 2 * ureg.s)
+    assert is_jit_active(_scalar)
+    assert not is_jit_disabled(_scalar)
 
 
 def test_jit_disabled_on_inference_failure(caplog):

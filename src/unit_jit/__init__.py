@@ -560,6 +560,34 @@ def get_rewritten_source(func: Callable[..., Any]) -> str:
     return src
 
 
+def _state_key(func: Callable[..., Any]) -> str:
+    """Module-qualified key under which runtime JIT state is tracked for func."""
+    return f"{func.__module__}::{func.__qualname__}"
+
+
+def is_jit_active(func: Callable[..., Any]) -> bool:
+    """Return True if func is running on the fast path (unit inference succeeded).
+
+    Reflects runtime state only: a function acquires this state on its first call
+    (or at decoration time when ``input_args`` is given), so this returns False for a
+    @unit_jit function that has never been called. When inference fails, the function
+    silently falls back to plain Pint on every call; ``is_jit_active`` returns False
+    and ``is_jit_disabled`` returns True. Use this to assert that hot paths are
+    actually accelerated rather than quietly degraded.
+    """
+    key = _state_key(func)
+    return key in _return_units and key not in _jit_disabled
+
+
+def is_jit_disabled(func: Callable[..., Any]) -> bool:
+    """Return True if JIT was disabled for func because unit inference failed.
+
+    Such a function runs as plain Pint on every call (no speedup). Returns False for a
+    @unit_jit function that has never been called.
+    """
+    return _state_key(func) in _jit_disabled
+
+
 # Decorator
 
 
