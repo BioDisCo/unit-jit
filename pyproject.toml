@@ -4,25 +4,24 @@ build-backend = "hatchling.build"
 
 [project]
 name = "unit-jit"
-version = "0.4.13"
+version = "0.5.0"
 description = "JIT unit-stripping decorator: write Pint-annotated code, run at float speed"
 authors = [{ name = "Matthias Függer" }]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "pint>=0.24",
-    "libcst>=1.4",
-    "numpy>=2.4.3",
+    "pint>=0.25.3",
+    "libcst>=1.9.0",
+    "numpy>=2.5.3",
 ]
 
 [project.optional-dependencies]
-numba = ["numba>=0.64.0"]
+numba = ["numba>=0.67.0"]
 dev = [
     "pytest>=8.0",
-    "numpy>=1.26",
     "ruff>=0.6",
-    "pintrs",
+    "pintrs>=0.4.6",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -38,7 +37,7 @@ select = ["E", "F", "I", "UP"]
 testpaths = ["tests"]
 
 [tool.pyright]
-pythonVersion = "3.12"
+pythonVersion = "3.13"
 venvPath = "."
 venv = ".venv"
 extraPaths = ["src"]

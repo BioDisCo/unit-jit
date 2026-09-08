@@ -4,7 +4,7 @@ from typing import cast
 
 import numpy as np
 import pytest
-from _jit_state import jit_active
+from _jit_state import expect_execution
 from pint import Quantity, UnitRegistry
 
 from unit_jit import unit_jit
@@ -23,7 +23,7 @@ def _vec_div(d: Quantity, t: Quantity) -> Quantity:
 @unit_jit
 def _l2_norm(v: Quantity) -> float:
     """L2 norm of a Quantity array; returns SI magnitude as plain float."""
-    mags = v.magnitude
+    mags = v.to_base_units().magnitude
     return float(np.sqrt(np.dot(mags, mags)))
 
 
@@ -69,8 +69,10 @@ def test_vec_div_non_si_units():
     """Input in non-SI units; fast path must still give correct SI result."""
     v_cm = np.array([300.0, 400.0]) * ureg.cm  # 3 m, 4 m
     t_ms = 2000.0 * ureg.ms  # 2 s
-    _vec_div(v_cm, t_ms)  # warm-up
-    result = _vec_div(v_cm, t_ms)
+    with expect_execution(_vec_div):
+        _vec_div(v_cm, t_ms)  # warm-up
+    with expect_execution(_vec_div):
+        result = _vec_div(v_cm, t_ms)
     np.testing.assert_allclose(result.to_base_units().magnitude, [1.5, 2.0], rtol=1e-12)
 
 
@@ -148,20 +150,20 @@ def test_weighted_sum_value():
 
 
 def test_vec_div_jit_active():
-    _vec_div(np.array([3.0, 4.0]) * ureg.m, 2.0 * ureg.s)  # warm-up
-    assert jit_active(_vec_div)
+    with expect_execution(_vec_div):
+        _vec_div(np.array([3.0, 4.0]) * ureg.m, 2.0 * ureg.s)  # warm-up
 
 
 def test_l2_norm_jit_active():
-    _l2_norm(np.array([3.0, 4.0]) * ureg.m)  # warm-up
-    assert jit_active(_l2_norm)
+    with expect_execution(_l2_norm):
+        _l2_norm(np.array([3.0, 4.0]) * ureg.m)  # warm-up
 
 
 def test_scale_plain_jit_active():
-    _scale_plain(np.array([1.0, 2.0, 3.0]), 2.0)  # warm-up
-    assert jit_active(_scale_plain)
+    with expect_execution(_scale_plain):
+        _scale_plain(np.array([1.0, 2.0, 3.0]), 2.0)  # warm-up
 
 
 def test_weighted_sum_jit_active():
-    _weighted_sum(np.array([1.0, 2.0, 3.0]) * ureg.m, np.array([0.5, 0.3, 0.2]))  # warm-up
-    assert jit_active(_weighted_sum)
+    with expect_execution(_weighted_sum):
+        _weighted_sum(np.array([1.0, 2.0, 3.0]) * ureg.m, np.array([0.5, 0.3, 0.2]))  # warm-up

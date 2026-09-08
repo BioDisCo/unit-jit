@@ -5,6 +5,7 @@ from typing import cast
 
 import numpy as np
 import pytest
+from _jit_state import expect_execution
 from pint import Quantity, UnitRegistry
 
 from unit_jit import unit_jit
@@ -21,7 +22,7 @@ def _div(d: Quantity, t: Quantity) -> Quantity:
 
 @unit_jit
 def _strip_mag(x: Quantity) -> float:
-    return x.magnitude  # stripped to plain float in fast zone
+    return x.magnitude  # original-scale access requires fallback
 
 
 @unit_jit
@@ -111,17 +112,21 @@ def test_unit_invariant():
     assert abs(r1.to_base_units().magnitude - r2.to_base_units().magnitude) < 1e-12
 
 
-def test_magnitude_stripped():
-    """A function that calls .magnitude returns a plain float in fast zone."""
-    _strip_mag(1 * ureg.m)  # warm-up
-    result = _strip_mag(5 * ureg.m)
+def test_bare_magnitude_uses_fallback():
+    """Bare magnitude retains the original scale through fallback."""
+    with expect_execution(_strip_mag, "fallback"):
+        _strip_mag(1 * ureg.m)  # warm-up
+    with expect_execution(_strip_mag, "fallback"):
+        result = _strip_mag(5 * ureg.m)
     assert isinstance(result, float | int)
 
 
 def test_quantity_return_wrapped():
     """Returning a Quantity directly is wrapped back by unit_jit."""
-    _velocity_loop(1)  # warm-up
-    result = _velocity_loop(10)
+    with expect_execution(_velocity_loop):
+        _velocity_loop(1)  # warm-up
+    with expect_execution(_velocity_loop):
+        result = _velocity_loop(10)
     assert isinstance(result, Quantity)
     assert abs(result.to_base_units().magnitude - 0.05) < 1e-12  # 10 cm / 2 s = 0.05 m/s
 
@@ -205,8 +210,8 @@ def test_body_if_branch_mismatched_constant_raises():
         _bad_branch(10 * ureg.m, 2 * ureg.s, True)
 
 
-def test_body_if_branch_inconsistent_return_raises():
-    """Branches returning different dimensions are caught by the inferrer."""
+def test_body_if_branch_inconsistent_return_falls_back():
+    """Valid branch-dependent dimensions retain Pint semantics through fallback."""
 
     @unit_jit
     def _inconsistent_return(d: Quantity, t: Quantity, flag: bool) -> Quantity:
@@ -214,8 +219,13 @@ def test_body_if_branch_inconsistent_return_raises():
             return cast("Quantity", d / t)  # [velocity]
         return d  # [length]
 
-    with pytest.raises(TypeError):
-        _inconsistent_return(10 * ureg.m, 2 * ureg.s, True)
+    from unit_jit import is_jit_disabled
+
+    with expect_execution(_inconsistent_return, "fallback"):
+        assert _inconsistent_return(10 * ureg.m, 2 * ureg.s, True) == 5 * ureg.m / ureg.s
+    with expect_execution(_inconsistent_return, "fallback"):
+        assert _inconsistent_return(10 * ureg.m, 2 * ureg.s, False) == 10 * ureg.m
+    assert is_jit_disabled(_inconsistent_return)
 
 
 def test_self_attr_dimension_mismatch_in_body_raises():
@@ -473,13 +483,10 @@ def test_namedtuple_params_result_correct():
 
 def test_namedtuple_params_jit_active():
     """JIT is active for a method that accesses NamedTuple params."""
-    import unit_jit as _uj
 
     alpha = 2.0 / ureg.s
     delta = 0.5 / ureg.s
     params = _NTParams(alpha=alpha, delta=delta)
     model = _ModelWithNamedTupleParams(params)
-    model.run(3.0 * ureg.mol / ureg.L)
-    key = f"{model.run.__module__}::{model.run.__qualname__}"
-    assert key in _uj._return_units
-    assert key not in _uj._jit_disabled
+    with expect_execution(model.run):
+        model.run(3.0 * ureg.mol / ureg.L)

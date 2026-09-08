@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import cast
 
+from _jit_state import expect_execution
 from pint import Quantity, UnitRegistry
 
 from unit_jit import unit_jit
@@ -54,7 +55,8 @@ def test_plain_helper_result():
         volume=1.0 * ureg.L,
     )
     n = 3.0 * ureg.mol / ureg.L
-    result = sys.total_rate(n)
+    with expect_execution(sys.total_rate):
+        result = sys.total_rate(n)
     expected = sys.propensity(n) * sys.volume
     assert isinstance(result, Quantity)
     assert abs(result.to_base_units().magnitude - expected.to_base_units().magnitude) < 1e-10
@@ -96,7 +98,8 @@ class _SystemListIndex:
 def test_list_index_result():
     sys = _SystemListIndex(alpha=0.5 / ureg.s / (ureg.mol / ureg.L))
     state = [0.0 * ureg.mol / ureg.L, 2.0 * ureg.mol / ureg.L]
-    result = sys.total_rate(state)
+    with expect_execution(sys.total_rate):
+        result = sys.total_rate(state)
     expected = 0.5 / ureg.s / (ureg.mol / ureg.L) * 2.0 * ureg.mol / ureg.L
     assert isinstance(result, Quantity)
     assert abs(result.to_base_units().magnitude - expected.to_base_units().magnitude) < 1e-10

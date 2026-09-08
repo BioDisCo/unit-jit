@@ -15,6 +15,7 @@ from typing import NamedTuple
 
 import numpy as np
 import pytest
+from _jit_state import expect_execution
 
 pintrs = pytest.importorskip("pintrs")
 
@@ -56,7 +57,7 @@ def _pt_weighted_sum(vals: pintrs.Quantity, weights: np.ndarray) -> pintrs.Quant
 
 @unit_jit
 def _pt_l2_norm(v: pintrs.Quantity) -> float:
-    mags = v.magnitude
+    mags = v.to_base_units().magnitude
     return float(np.sqrt(np.dot(mags, mags)))
 
 
@@ -114,24 +115,31 @@ def test_returns_pintrs_quantity():
 
 
 def test_magnitude_correct():
-    _pt_div(10 * ureg.m, 2 * ureg.s)  # warm-up
-    result = _pt_div(10 * ureg.m, 2 * ureg.s)
+    with expect_execution(_pt_div):
+        _pt_div(10 * ureg.m, 2 * ureg.s)  # warm-up
+    with expect_execution(_pt_div):
+        result = _pt_div(10 * ureg.m, 2 * ureg.s)
     expected = (10 * ureg.m / (2 * ureg.s)).to_base_units().magnitude
     assert abs(result.to_base_units().magnitude - expected) < 1e-12
 
 
 def test_unit_invariant():
     """cm/s and m/s inputs give the same SI result."""
-    _pt_div(1 * ureg.m, 1 * ureg.s)  # warm-up
-    r1 = _pt_div(10 * ureg.m, 2 * ureg.s)
-    r2 = _pt_div(1000 * ureg.cm, 200 * ureg.cs)
+    with expect_execution(_pt_div):
+        _pt_div(1 * ureg.m, 1 * ureg.s)  # warm-up
+    with expect_execution(_pt_div):
+        r1 = _pt_div(10 * ureg.m, 2 * ureg.s)
+    with expect_execution(_pt_div):
+        r2 = _pt_div(1000 * ureg.cm, 200 * ureg.cs)
     assert abs(r1.to_base_units().magnitude - r2.to_base_units().magnitude) < 1e-12
 
 
 def test_unit_literal_rewriting():
     """ureg.UNIT literals inside the body are rewritten to SI floats."""
-    _pt_velocity_loop(1)  # warm-up
-    result = _pt_velocity_loop(5)
+    with expect_execution(_pt_velocity_loop):
+        _pt_velocity_loop(1)  # warm-up
+    with expect_execution(_pt_velocity_loop):
+        result = _pt_velocity_loop(5)
     assert isinstance(result, pintrs.Quantity)
     assert abs(result.to_base_units().magnitude - 0.05) < 1e-12  # 10 cm / 2 s = 0.05 m/s
 
@@ -173,16 +181,20 @@ def test_vec_div_non_si_input():
     """Non-SI inputs are converted correctly: 300 cm / 2000 ms = 1.5 m/s."""
     v = np.array([300.0, 600.0]) * ureg.cm
     t = 2000.0 * ureg.ms
-    _pt_vec_div(v, t)  # warm-up
-    result = _pt_vec_div(v, t)
+    with expect_execution(_pt_vec_div):
+        _pt_vec_div(v, t)  # warm-up
+    with expect_execution(_pt_vec_div):
+        result = _pt_vec_div(v, t)
     np.testing.assert_allclose(result.to_base_units().magnitude, [1.5, 3.0], rtol=1e-12)
 
 
 def test_weighted_sum_value():
     vals = np.array([1.0, 2.0, 3.0]) * ureg.m
     w = np.array([0.5, 0.3, 0.2])
-    _pt_weighted_sum(vals, w)  # warm-up
-    result = _pt_weighted_sum(vals, w)
+    with expect_execution(_pt_weighted_sum):
+        _pt_weighted_sum(vals, w)  # warm-up
+    with expect_execution(_pt_weighted_sum):
+        result = _pt_weighted_sum(vals, w)
     expected = float(np.dot(vals.to_base_units().magnitude, w))
     assert isinstance(result, pintrs.Quantity)
     assert abs(result.to_base_units().magnitude - expected) < 1e-12
@@ -199,8 +211,10 @@ def test_l2_norm_returns_float():
 def test_l2_norm_non_si_units():
     """Norm of input in cm equals SI magnitude norm (metres)."""
     v = np.array([300.0, 400.0]) * ureg.cm  # 3 m, 4 m
-    _pt_l2_norm(v)  # warm-up
-    assert abs(_pt_l2_norm(v) - 5.0) < 1e-12
+    with expect_execution(_pt_l2_norm):
+        _pt_l2_norm(v)  # warm-up
+    with expect_execution(_pt_l2_norm):
+        assert abs(_pt_l2_norm(v) - 5.0) < 1e-12
 
 
 # === class with inner method call ===

@@ -30,39 +30,58 @@ import inspect
 import logging
 import textwrap
 import threading
-import weakref
 from collections import defaultdict
 from collections.abc import Callable
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, overload
 
 import libcst as cst
 import numpy as np
 from pint import UnitRegistry
 
+from unit_jit._admission import CallableBinding
+from unit_jit._dispatch import DispatchBinding
+from unit_jit._execution import (
+    ExecutionCall as ExecutionCall,
+)
+from unit_jit._execution import (
+    ExecutionTrace as ExecutionTrace,
+)
+from unit_jit._execution import (
+    QuantitySnapshot as QuantitySnapshot,
+)
+from unit_jit._execution import (
+    _invoke,
+)
+from unit_jit._execution import (
+    trace_execution as trace_execution,
+)
 from unit_jit._inferrer import (  # noqa: E402
+    _QUANTITY_DISPATCH,
     _QUANTITY_TYPES,
     _REGISTRY_TYPES,
     _SENTINEL,
-    _SNAP_KEY,
     _UNIT_TYPES,
     _UNKNOWN,  # noqa: F401 (re-exported for tests)
-    _ListReturn,
+    SequenceValue,
+    _Binding,
+    _InferenceContext,
     _strip_decorators,
+    _Unsupported,
     infer_return_units,
 )
+from unit_jit._schema import argument_schema, check_schema
+from unit_jit._scope import LexicalBindings, conversion_scale
+from unit_jit._values import PLAIN, AbstractValue, QuantityValue
 
 _log = logging.getLogger(__name__)
 
 _fast_zone = threading.local()
 _registry: dict[str, list[Callable[..., Any]]] = defaultdict(list)
-_compiled: dict[str, dict[str, Callable[..., Any]]] = {}
+_compiled: dict[str, dict[Callable[..., Any], Callable[..., Any]]] = {}
 _rewritten_src: dict[str, str] = {}  # qualname -> rewritten source
-_return_units: dict[str, Any] = {}
-_arg_dims: dict[str, tuple[list[Any], dict[str, Any]]] = {}  # qualname -> (positional, keyword)
-_use_numba: set[str] = set()  # qualnames for which numba.jit should be applied
-_return_registry: dict[str, UnitRegistry | None] = {}  # qualname -> registry used to wrap results
-_jit_disabled: set[str] = set()  # qualnames where inference failed: always run original
-_snapshot_cache: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+_use_numba: set[Callable[..., Any]] = set()  # functions for which numba.jit should be applied
 
 # Sentinel used in the saved list to signal a NamedTuple restore (see _strip_inplace).
 _NT_RESTORE: object = object()
@@ -70,38 +89,6 @@ _NT_RESTORE: object = object()
 
 def _in_fast_zone() -> bool:
     return getattr(_fast_zone, "active", False)
-
-
-def _eval_numeric_cst(node: cst.BaseExpression) -> float | None:
-    if isinstance(node, cst.Integer):
-        return float(node.value)
-    if isinstance(node, cst.Float):
-        return float(node.value)
-    if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
-        value = _eval_numeric_cst(node.expression)
-        return -value if value is not None else None
-    if isinstance(node, cst.BinaryOperation):
-        left = _eval_numeric_cst(node.left)
-        right = _eval_numeric_cst(node.right)
-        if left is None or right is None:
-            return None
-        if isinstance(node.operator, cst.Add):
-            return left + right
-        if isinstance(node.operator, cst.Subtract):
-            return left - right
-        if isinstance(node.operator, cst.Multiply):
-            return left * right
-        if isinstance(node.operator, cst.Divide):
-            return left / right
-        if isinstance(node.operator, cst.FloorDivide):
-            return left // right
-        if isinstance(node.operator, cst.Power):
-            return left**right
-    return None
-
-
-def _unit_jit_rescale_to_magnitude(value: Any, scale: float) -> Any:
-    return value / scale
 
 
 def _ureg_si_magnitude(ureg_instance: UnitRegistry, unit_name: str) -> float | None:
@@ -122,9 +109,21 @@ def _ureg_si_magnitude(ureg_instance: UnitRegistry, unit_name: str) -> float | N
 class _QuantityStripper(cst.CSTTransformer):
     """Strip unit-aware Quantity syntax into float operations for the fast zone."""
 
-    def __init__(self, ureg_vars: dict[str, UnitRegistry]) -> None:
+    def __init__(
+        self,
+        ureg_vars: dict[str, UnitRegistry],
+        *,
+        strip_cast: bool = True,
+        nonlocals: tuple[str, ...] = (),
+    ) -> None:
         super().__init__()
         self._ureg_vars = ureg_vars
+        self._strip_cast = strip_cast
+        self._bindings = None
+        self._nonlocals = nonlocals
+
+    def visit_Module(self, node: cst.Module) -> None:
+        self._bindings = LexicalBindings(node, self._nonlocals)
 
     def leave_Attribute(
         self, original_node: cst.Attribute, updated_node: cst.Attribute
@@ -137,31 +136,24 @@ class _QuantityStripper(cst.CSTTransformer):
                 and updated_node.value.func.attr.value == "to"
                 and len(updated_node.value.args) == 1
             ):
-                unit_arg = updated_node.value.args[0].value
-                scale = _eval_numeric_cst(unit_arg)
+                scale = conversion_scale(
+                    original_node.value.args[0].value, self._ureg_vars, self._bindings
+                )
                 if scale is not None:
-                    return cst.Call(
-                        func=cst.Name("_unit_jit_rescale_to_magnitude"),
-                        args=[
-                            cst.Arg(updated_node.value.func.value),
-                            cst.Arg(cst.Float(repr(float(scale)))),
-                        ],
+                    return cst.BinaryOperation(
+                        left=updated_node.value.func.value,
+                        operator=cst.Divide(),
+                        right=cst.Float(repr(scale)),
+                        lpar=[cst.LeftParen()],
+                        rpar=[cst.RightParen()],
                     )
-                if isinstance(unit_arg, cst.Attribute) and isinstance(unit_arg.value, cst.Name):
-                    ureg_instance = self._ureg_vars.get(unit_arg.value.value)
-                    if ureg_instance is not None:
-                        si_val = _ureg_si_magnitude(ureg_instance, unit_arg.attr.value)
-                        if si_val is not None:
-                            return cst.Call(
-                                func=cst.Name("_unit_jit_rescale_to_magnitude"),
-                                args=[
-                                    cst.Arg(updated_node.value.func.value),
-                                    cst.Arg(cst.Float(repr(si_val))),
-                                ],
-                            )
             return updated_node.value
         # ureg.UNIT -> SI float (e.g. ureg.s -> 1.0, ureg.cm -> 0.01)
-        if isinstance(updated_node.value, cst.Name):
+        if (
+            isinstance(updated_node.value, cst.Name)
+            and self._bindings is not None
+            and self._bindings.external(original_node.value)
+        ):
             ureg_instance = self._ureg_vars.get(updated_node.value.value)
             if ureg_instance is not None:
                 si_val = _ureg_si_magnitude(ureg_instance, updated_node.attr.value)
@@ -180,7 +172,10 @@ class _QuantityStripper(cst.CSTTransformer):
 
         # cast("Quantity", x) -> x
         if (
-            isinstance(updated_node.func, cst.Name)
+            self._strip_cast
+            and self._bindings is not None
+            and self._bindings.external(original_node.func)
+            and isinstance(updated_node.func, cst.Name)
             and updated_node.func.value == "cast"
             and len(updated_node.args) == 2
             and isinstance(updated_node.args[0].value, cst.SimpleString)
@@ -194,209 +189,104 @@ class _QuantityStripper(cst.CSTTransformer):
 # Boundary helpers
 
 
-def _snapshot(obj: Any) -> Any:
-    """Eagerly convert all Quantity attrs to SI floats, once at boundary entry.
-
-    Plain Quantity objects are converted directly to their SI magnitude.
-    NamedTuples are reconstructed with each field recursively snapshotted.
-    For other objects, returns an instance of the same class (so method lookup
-    still works) with a float-valued __dict__.
-
-    Results are cached in a WeakKeyDictionary so that repeated calls with the
-    same object (e.g. self on every SDE step) pay the Pint conversion cost only
-    once.  The cache entry is evicted automatically when the object is garbage
-    collected.  Caching is skipped for objects whose __dict__ may change
-    (detected by the _SNAP_KEY sentinel already being present, meaning we have
-    already snapshotted and there is nothing to do).
-    """
-    if isinstance(obj, _QUANTITY_TYPES):
-        return obj.to_base_units().magnitude
-    if hasattr(type(obj), "_fields"):  # NamedTuple — immutable, always cache-safe
-        try:
-            cached = _snapshot_cache[obj]
-            return cached
-        except (KeyError, TypeError):
-            pass
-        result = type(obj)._make(_snapshot(v) for v in obj)  # type: ignore[attr-defined]
-        try:
-            _snapshot_cache[obj] = result
-        except TypeError:
-            pass
-        return result
-    try:
-        cached = _snapshot_cache[obj]
-        return cached
-    except (KeyError, TypeError):
-        pass
-    try:
-        snap = object.__new__(type(obj))
-    except TypeError:
-        return obj  # C-extension type or abstract class with required constructor args
-    snap_dict: dict[str, Any] = {_SNAP_KEY: True}
-    # Pre-register snap before recursing so that any back-reference (direct
-    # or through a cycle) returns this proxy instead of re-entering _snapshot
-    # for the same object.
-    try:
-        _snapshot_cache[obj] = snap
-    except TypeError:
-        pass
-    try:
-        for name, val in getattr(obj, "__dict__", {}).items():
-            if isinstance(val, _QUANTITY_TYPES):
-                snap_dict[name] = val.to_base_units().magnitude
-            elif isinstance(val, list):
-                snap_dict[name] = [_snapshot(el) for el in val]
-            elif hasattr(type(val), "_fields") and isinstance(val, tuple):  # NamedTuple
-                snap_dict[name] = _snapshot(val)
-            elif isinstance(val, tuple):
-                snap_dict[name] = tuple(_snapshot(el) for el in val)
-            elif (
-                hasattr(val, "__dict__")
-                and not callable(val)
-                and not hasattr(val, "__array_interface__")
-            ):
-                snap_dict[name] = _snapshot(val)
-            else:
-                snap_dict[name] = val
-        snap.__dict__.update(snap_dict)
-        return snap
-    except Exception:  # noqa: BLE001 — Pint raises varied types; recursive calls may too
-        # Evict any incomplete entry so the next call retries cleanly.
-        try:
-            del _snapshot_cache[obj]
-        except (KeyError, TypeError):
-            pass
-        return obj
-
-
-def _to_fast(arg: Any) -> Any:
-    """Convert a Quantity to an SI float; snapshot complex objects; leave the rest unchanged."""
-    if isinstance(arg, _QUANTITY_TYPES):
-        return arg.to_base_units().magnitude
-    if isinstance(arg, list):
-        return [_to_fast(el) for el in arg]
-    if hasattr(type(arg), "_fields") and isinstance(arg, tuple):  # NamedTuple before plain tuple
-        return type(arg)._make(_to_fast(el) for el in arg)  # type: ignore[attr-defined]
-    if isinstance(arg, tuple):
-        return tuple(_to_fast(el) for el in arg)
-    if isinstance(arg, (int, float, bool, str, bytes, type(None))):
-        return arg
-    if hasattr(arg, "__array_interface__"):  # numpy arrays
-        return arg
-    if _SNAP_KEY in getattr(arg, "__dict__", {}):
-        return arg  # already snapshotted
-    return _snapshot(arg)
-
-
-def _strip_inplace(obj: Any, visited: set[int] | None = None) -> list[tuple[Any, str, Any, Any]]:
-    """Strip Pint Quantity attrs from obj in-place; return saved list for restoration.
-
-    Each entry is either:
-      (obj, name, registry, base_units)  — Pint Quantity: restore by re-wrapping
-      (obj, name, _NT_RESTORE, original) — NamedTuple: restore by direct assignment
-
-    NamedTuples are immutable, so we replace the attribute on the parent object with
-    a new NamedTuple whose Pint fields have been stripped to SI floats.
-    Traverses the object graph recursively; cycles are handled via visited.
-    """
-    if visited is None:
-        visited = set()
-    obj_id = id(obj)
-    if obj_id in visited:
-        return []
-    visited.add(obj_id)
-    saved: list[tuple[Any, str, Any, Any]] = []
-    for name, val in list(getattr(obj, "__dict__", {}).items()):
-        if isinstance(val, _QUANTITY_TYPES):
-            base = val.to_base_units()
-            saved.append((obj, name, val._REGISTRY, base.units))
-            obj.__dict__[name] = base.magnitude
-        elif hasattr(type(val), "_fields") and isinstance(val, tuple):
-            # NamedTuple: fields are immutable tuple slots, not writable via __dict__.
-            # Build a new NamedTuple with Pint fields stripped, replace on parent.
-            new_fields = [
-                f.to_base_units().magnitude if isinstance(f, _QUANTITY_TYPES) else f for f in val
-            ]
-            saved.append((obj, name, _NT_RESTORE, val))
-            obj.__dict__[name] = type(val)._make(new_fields)  # type: ignore[attr-defined]
-        elif isinstance(val, list):
-            for el in val:
-                if (
-                    hasattr(el, "__dict__")
-                    and not callable(el)
-                    and not hasattr(el, "__array_interface__")
-                ):
-                    saved.extend(_strip_inplace(el, visited))
-        elif (
-            hasattr(val, "__dict__")
-            and not callable(val)
-            and not hasattr(val, "__array_interface__")
-        ):
-            saved.extend(_strip_inplace(val, visited))
-    return saved
-
-
 def _restore_inplace(saved: list[tuple[Any, str, Any, Any]]) -> None:
-    """Re-wrap float attrs with their original Pint units after a JIT call."""
+    """Restore every journaled field, including after preparation fails."""
+    errors: list[Exception] = []
     for obj, name, registry, units in reversed(saved):
-        if registry is _NT_RESTORE:
-            obj.__dict__[name] = units  # units slot holds the original NamedTuple
-            continue
-        current = obj.__dict__.get(name)
-        if current is not None:
-            try:
-                obj.__dict__[name] = registry.Quantity(current, units)
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            if registry is _NT_RESTORE:
+                obj.__dict__[name] = units
+            else:
+                obj.__dict__[name] = registry.Quantity(obj.__dict__[name], units)
+        except Exception as exc:
+            errors.append(exc)
+    if errors:
+        raise ExceptionGroup("failed to restore JIT argument fields", errors)
 
 
-def _prepare_arg(arg: Any, stripped: list[tuple[Any, str, Any, Any]]) -> Any:
-    """At the outer JIT boundary: Quantities -> SI floats; mutable objects -> stripped in-place."""
+def _base_quantity(arg: Any) -> Any:
+    """Shared conversion boundary for direct quantities and object fields."""
+    return arg.to_base_units()
+
+
+def _prepare_arg(
+    arg: Any,
+    stripped: list[tuple[Any, str, Any, Any]],
+    memo: dict[int, Any] | None = None,
+) -> Any:
+    """Convert one argument graph, journaling changes before recursive preparation."""
+    if memo is None:
+        memo = {}
     if isinstance(arg, _QUANTITY_TYPES):
-        return arg.to_base_units().magnitude
-    if isinstance(arg, (int, float, bool, str, bytes, type(None))):
+        return _base_quantity(arg).magnitude
+    if isinstance(arg, (int, float, bool, str, bytes, type(None))) or callable(arg):
         return arg
-    if hasattr(arg, "__array_interface__"):
+    if isinstance(arg, (np.ndarray, np.random.Generator)):
         return arg
-    if hasattr(type(arg), "_fields") and isinstance(arg, tuple):  # NamedTuple
-        return type(arg)._make(_to_fast(el) for el in arg)  # type: ignore[attr-defined]
-    if isinstance(arg, tuple):
-        return tuple(_to_fast(el) for el in arg)
+    if id(arg) in memo:
+        return memo[id(arg)]
     if isinstance(arg, list):
-        return [_to_fast(el) for el in arg]
-    if hasattr(arg, "__dict__") and not callable(arg):
-        stripped.extend(_strip_inplace(arg))
-        return arg  # pass original, now stripped in-place
+        result: list[Any] = []
+        memo[id(arg)] = result
+        result.extend(_prepare_arg(el, stripped, memo) for el in arg)
+        return result
+    if isinstance(arg, tuple):
+        # A tuple -> object -> same tuple cycle is broken by pre-registering the
+        # original tuple. Its object's fields are prepared independently below.
+        memo[id(arg)] = arg
+        fields = [_prepare_arg(el, stripped, memo) for el in arg]
+        result_tuple = type(arg)._make(fields) if hasattr(type(arg), "_fields") else tuple(fields)
+        memo[id(arg)] = result_tuple
+        return result_tuple
+    memo[id(arg)] = arg
+    for name, value in list(getattr(arg, "__dict__", {}).items()):
+        if isinstance(value, _QUANTITY_TYPES):
+            base = _base_quantity(value)
+            stripped.append((arg, name, value._REGISTRY, base.units))
+            arg.__dict__[name] = base.magnitude
+        elif isinstance(value, (tuple, list)):
+            stripped.append((arg, name, _NT_RESTORE, value))
+            arg.__dict__[name] = _prepare_arg(value, stripped, memo)
+        else:
+            _prepare_arg(value, stripped, memo)
     return arg
 
 
-def _wrap(result: Any, unit_info: Any, wrap_ureg: UnitRegistry | None) -> Any:
+@contextmanager
+def _prepared(bound: inspect.BoundArguments):
+    """Own the conversion memo and rollback journal for one body invocation."""
+    journal: list[tuple[Any, str, Any, Any]] = []
+    try:
+        memo: dict[int, Any] = {}
+        for name, value in bound.arguments.items():
+            bound.arguments[name] = _prepare_arg(value, journal, memo)
+        yield
+    finally:
+        _restore_inplace(journal)
+
+
+def _wrap(result: Any, unit_info: AbstractValue, wrap_ureg: UnitRegistry | None) -> Any:
     """Wrap a float/array result back into a Quantity using cached SI units.
 
-    Handles nested structures: _ListReturn entries may themselves be _ListReturn,
-    enabling list[tuple[Quantity, ...]] and similar return types. Variable-length
-    lists are supported by repeating the last inferred element unit.
+    Nested structures retain their per-field schemas. Only explicitly homogeneous
+    variable-length containers repeat an inferred element unit.
     """
-    if unit_info is None or unit_info is _UNKNOWN:
+    if unit_info is PLAIN:
         return result
-    assert wrap_ureg is not None
-    if isinstance(unit_info, _ListReturn):
+    if isinstance(unit_info, SequenceValue):
         n = len(result)
         units = unit_info.units
-        if len(units) < n:
-            units = list(units) + [units[-1]] * (n - len(units))
+        if unit_info.repeated:
+            units = units * n
+        elif len(units) != n:
+            raise RuntimeError("JIT return shape differs from its verified schema")
         wrapped = [_wrap(r, u, wrap_ureg) for r, u in zip(result, units)]
         if unit_info.kind == "namedtuple" and unit_info.cls is not None:
             return unit_info.cls._make(wrapped)  # type: ignore[attr-defined]
         return wrapped if unit_info.kind == "list" else tuple(wrapped)
-    if isinstance(unit_info, tuple):
-        cls, units = unit_info
-        if isinstance(units, list):
-            return cls(
-                wrap_ureg.Quantity(r, u) if u is not None else r for r, u in zip(result, units)
-            )
-        return cls(wrap_ureg.Quantity(r, units) for r in result)
-    return wrap_ureg.Quantity(result, unit_info)
+    if not isinstance(unit_info, QuantityValue) or wrap_ureg is None:
+        raise RuntimeError("unverified return representation")
+    return wrap_ureg.Quantity(result, unit_info.unit)
 
 
 # Compilation
@@ -406,10 +296,8 @@ def _compile_module(module_name: str) -> None:
     """Rewrite all @unit_jit functions from a module at once."""
     funcs = _registry[module_name]
     module_globals = funcs[0].__globals__
-    module_globals.setdefault("_unit_jit_rescale_to_magnitude", _unit_jit_rescale_to_magnitude)
     ureg_vars = {k: v for k, v in module_globals.items() if isinstance(v, _REGISTRY_TYPES)}
-    stripper = _QuantityStripper(ureg_vars)
-    fast: dict[str, Callable[..., Any]] = {}
+    fast: dict[Callable[..., Any], Callable[..., Any]] = {}
 
     for func in funcs:
         try:
@@ -417,11 +305,37 @@ def _compile_module(module_name: str) -> None:
             src = textwrap.dedent(src)
             src = _strip_decorators(src)
             tree = cst.parse_module(src)
+            # Boundary binding supplies every default. Re-evaluating defaults or
+            # annotations here could execute arbitrary user code a second time.
+            definition = tree.body[0]
+            if not isinstance(definition, cst.FunctionDef):
+                raise SyntaxError("expected a function definition")
+
+            def parameter(param: cst.Param) -> cst.Param:
+                return param.with_changes(
+                    default=None, equal=cst.MaybeSentinel.DEFAULT, annotation=None
+                )
+
+            params = definition.params
+            definition = definition.with_changes(
+                returns=None,
+                params=params.with_changes(
+                    params=[parameter(p) for p in params.params],
+                    posonly_params=[parameter(p) for p in params.posonly_params],
+                    kwonly_params=[parameter(p) for p in params.kwonly_params],
+                    star_arg=parameter(params.star_arg)
+                    if isinstance(params.star_arg, cst.Param)
+                    else params.star_arg,
+                    star_kwarg=parameter(params.star_kwarg) if params.star_kwarg else None,
+                ),
+            )
+            tree = tree.with_changes(body=[definition])
+            stripper = _QuantityStripper(ureg_vars, nonlocals=func.__code__.co_freevars)
             new_src = tree.visit(stripper).code
             namespace: dict[str, Any] = {}
             exec(new_src, module_globals, namespace)
             rewritten = namespace[func.__name__]
-            if func.__qualname__ in _use_numba:
+            if func in _use_numba:
                 try:
                     import numba as _numba  # lazy: only when use_numba=True
                 except ImportError:
@@ -429,17 +343,134 @@ def _compile_module(module_name: str) -> None:
                         "numba not installed; '%s' will run without Numba JIT", func.__name__
                     )
                 else:
-                    rewritten = _numba.jit(nopython=True)(rewritten)
+                    rewritten = _numba.jit(nopython=True, boundscheck=True)(rewritten)
                     _log.debug("applied numba.jit to '%s'", func.__name__)
-            fast[func.__qualname__] = rewritten
+            fast[func] = rewritten
             _rewritten_src[func.__qualname__] = new_src
             if new_src != src:
                 _log.debug("rewrote '%s'", func.__name__)
-        except (OSError, cst.ParserSyntaxError, SyntaxError) as exc:
+        except (OSError, cst.ParserSyntaxError, SyntaxError, NameError) as exc:
             _log.debug("could not rewrite '%s': %s", func.__name__, exc)
-            fast[func.__name__] = func
+            fast[func] = func
 
     _compiled[module_name] = fast
+
+
+@dataclass(frozen=True)
+class _Plan:
+    original: Callable[..., Any]
+    fast: Callable[..., Any]
+    units: AbstractValue
+    registry: Any
+    callees: dict[Callable[..., Any], Callable[..., Any]]
+    bindings: tuple[_Binding | DispatchBinding | CallableBinding, ...]
+    schema: dict[str, Any]
+
+    def valid(self) -> bool:
+        return all(binding.unchanged() for binding in self.bindings) and all(
+            not is_jit_disabled(callee) for callee in self.callees
+        )
+
+
+@dataclass(frozen=True)
+class _Fallback:
+    reason: str
+
+
+_states: dict[str, _Plan | _Fallback] = {}
+_compilation_lock = threading.RLock()
+
+
+def _make_plan(
+    func: Callable[..., Any],
+    units: Any,
+    registry: Any,
+    context: _InferenceContext,
+    schema: dict[str, Any],
+) -> _Plan:
+    def check_return(unit: Any) -> None:
+        if isinstance(unit, SequenceValue):
+            for element in unit.units:
+                check_return(element)
+        elif unit is not PLAIN and not isinstance(unit, QuantityValue):
+            raise _Unsupported("unsupported return representation")
+
+    check_return(units)
+    if context.quantity_sources:
+        try:
+            context.bindings.extend(
+                _QUANTITY_DISPATCH.guard(None, context.quantity_sources.values())
+            )
+        except ValueError as exc:
+            raise _Unsupported(str(exc)) from exc
+    callees: dict[Callable[..., Any], Callable[..., Any]] = {}
+    for dependency in [func, *context.callees]:
+        module = dependency.__module__
+        registered = dependency in _registry.get(module, ())
+        if registered:
+            if is_jit_disabled(dependency):
+                raise _Unsupported(f"callee {dependency.__qualname__} is disabled")
+            if module not in _compiled:
+                _compile_module(module)
+            fast = _compiled[module].get(dependency, dependency)
+            if fast is dependency:
+                raise _Unsupported(f"source for {dependency.__qualname__} cannot be rewritten")
+            callees[dependency] = fast
+        if dependency in context.plain_callees or not registered:
+            # Plain helpers run unchanged on the prepared original object. Allow
+            # them only when their verified body needs no unit-specific rewrite.
+            source = textwrap.dedent(_strip_decorators(inspect.getsource(dependency)))
+            tree = cst.parse_module(source)
+            registries = {
+                k: v for k, v in dependency.__globals__.items() if isinstance(v, _REGISTRY_TYPES)
+            }
+            if (
+                tree.visit(
+                    _QuantityStripper(
+                        registries, strip_cast=False, nonlocals=dependency.__code__.co_freevars
+                    )
+                ).code
+                != tree.code
+            ):
+                raise _Unsupported(f"plain callee {dependency.__qualname__} requires rewriting")
+    return _Plan(func, callees[func], units, registry, callees, tuple(context.bindings), schema)
+
+
+def _get_plan(func: Callable[..., Any], bound: inspect.BoundArguments) -> _Plan | None:
+    """Guard and publish one specialization atomically; never execute user code here."""
+    key = _state_key(func)
+    with _compilation_lock:
+        cached = _states.get(key)
+        if isinstance(cached, _Fallback):
+            return None
+        try:
+            if cached is not None and not cached.valid():
+                return None
+            schema = argument_schema(bound.arguments)
+            if cached is not None:
+                if cached.original is not func or not check_schema(cached.schema, schema):
+                    return None
+                return cached
+            context = _InferenceContext()
+            units, registry = infer_return_units(
+                func,
+                bound.args,
+                bound.kwargs,
+                context=context,
+            )
+            if units is _SENTINEL:
+                raise _Unsupported("unit inference did not establish a safe computation")
+            plan = _make_plan(func, units, registry, context, schema)
+        except _Unsupported as exc:
+            if cached is not None:
+                return None
+            _states[key] = _Fallback(str(exc))
+            _log.warning(
+                "'%s': unit inference failed; running as plain Pint (%s)", func.__qualname__, exc
+            )
+            return None
+        _states[key] = plan
+        return plan
 
 
 def compile(instance: Any) -> None:  # noqa: A001 (intentional shadow of built-in)
@@ -454,10 +485,6 @@ def compile(instance: Any) -> None:  # noqa: A001 (intentional shadow of built-i
     * ``Sequence[Quantity]`` / list-of-Quantity parameters → ``self.init_state``
       equivalent, built from Quantity attrs on the instance
     * Everything else → skipped (inference may fall back to lazy on first real call)
-
-    After all methods have been attempted, any stale snapshot that was cached for
-    ``instance`` during failed warm-up calls is evicted from ``_snapshot_cache``
-    so that the next real call builds a fresh, fully-populated snapshot.
 
     Call this once after constructing an instance if you need inner method
     calls (e.g. ``self.reaction_rates(...)`` called from within a JIT-fast
@@ -517,7 +544,7 @@ def compile(instance: Any) -> None:  # noqa: A001 (intentional shadow of built-i
             continue
         qualname = method.__qualname__
         key = f"{method.__module__}::{qualname}"
-        if key in _return_units or key in _jit_disabled:
+        if key in _states:
             continue  # already compiled
         inner_func = getattr(method, "__wrapped__", None)
         if inner_func is None:
@@ -536,13 +563,6 @@ def compile(instance: Any) -> None:  # noqa: A001 (intentional shadow of built-i
             bound(*dummy_args)
         except Exception:
             pass  # inference errors are non-fatal
-
-    # Evict any stale snapshot that was cached during warm-up calls so the next
-    # real simulation call builds a fresh snapshot with all instance attributes.
-    try:
-        del _snapshot_cache[instance]
-    except (KeyError, TypeError):
-        pass
 
 
 def get_rewritten_source(func: Callable[..., Any]) -> str:
@@ -566,17 +586,14 @@ def _state_key(func: Callable[..., Any]) -> str:
 
 
 def is_jit_active(func: Callable[..., Any]) -> bool:
-    """Return True if func is running on the fast path (unit inference succeeded).
+    """Return whether func has a cached fast specialization and is not disabled.
 
-    Reflects runtime state only: a function acquires this state on its first call
-    (or at decoration time when ``input_args`` is given), so this returns False for a
-    @unit_jit function that has never been called. When inference fails, the function
-    silently falls back to plain Pint on every call; ``is_jit_active`` returns False
-    and ``is_jit_disabled`` returns True. Use this to assert that hot paths are
-    actually accelerated rather than quietly degraded.
+    This does not prove that a particular call used that specialization: a changed
+    schema or dependency can cause per-call fallback. Use trace_execution() to
+    observe actual execution, stripped arguments and raw results.
     """
     key = _state_key(func)
-    return key in _return_units and key not in _jit_disabled
+    return isinstance(_states.get(key), _Plan)
 
 
 def is_jit_disabled(func: Callable[..., Any]) -> bool:
@@ -585,7 +602,7 @@ def is_jit_disabled(func: Callable[..., Any]) -> bool:
     Such a function runs as plain Pint on every call (no speedup). Returns False for a
     @unit_jit function that has never been called.
     """
-    return _state_key(func) in _jit_disabled
+    return isinstance(_states.get(_state_key(func)), _Fallback)
 
 
 # Decorator
@@ -659,107 +676,45 @@ def unit_jit(
         return func
 
     if use_numba:
-        _use_numba.add(func.__qualname__)
+        _use_numba.add(func)
+    else:
+        _use_numba.discard(func)
 
     module_name = func.__module__
     _registry[module_name].append(func)
+    _compiled.pop(module_name, None)  # Late decorators must be included on the next compile.
+
+    signature = inspect.signature(func)
+    key = f"{module_name}::{func.__qualname__}"
+    # A new definition with the same qualified name must not inherit old inference.
+    _states.pop(key, None)
+
+    initial_callable = CallableBinding.capture(func)
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        if module_name not in _compiled:
-            _compile_module(module_name)
-
-        fast_func: Callable[..., Any] = _compiled[module_name].get(func.__qualname__, func)  # type: ignore[assignment]
-        qualname = func.__qualname__
-        # Use a module-qualified key so functions with identical __qualname__ in
-        # different modules do not collide in the shared state dicts.
-        key = f"{module_name}::{qualname}"
-
+        current_signature = signature if initial_callable.unchanged() else inspect.signature(func)
+        bound = current_signature.bind(*args, **kwargs)
+        bound.apply_defaults()
         if _in_fast_zone():
-            # Already in float world: strip any Quantity attrs from mutable objects
-            # in-place (same as the outer boundary) so mutations propagate to the
-            # original, then restore after the call.
-            stripped_inner: list[tuple[Any, str, Any, Any]] = []
-            fast_args = tuple(_prepare_arg(a, stripped_inner) for a in args)
-            fast_kwargs = {k: _prepare_arg(v, stripped_inner) for k, v in kwargs.items()}
+            fast_func = _fast_zone.callees.get(func)
+            if fast_func is None:
+                raise RuntimeError(f"unverified inner JIT call: {func.__qualname__}")
+            with _prepared(bound):
+                return _invoke(func, fast_func, bound, "fast")
+
+        plan = _get_plan(func, bound)
+        if plan is None:
+            return _invoke(func, func, bound, "fallback")
+        with _prepared(bound):
             try:
-                return fast_func(*fast_args, **fast_kwargs)
+                _fast_zone.callees = plan.callees
+                _fast_zone.active = True
+                raw = _invoke(func, plan.fast, bound, "fast")
             finally:
-                _restore_inplace(stripped_inner)
+                _fast_zone.active = False
+                _fast_zone.callees = {}
 
-        # Functions where inference failed always run as original Pint (no JIT).
-        if key in _jit_disabled:
-            return func(*args, **kwargs)
-
-        # Entry point: infer units on first call via abstract interpretation.
-        if key not in _return_units:
-            _arg_dims[key] = (
-                [a.dimensionality if isinstance(a, _QUANTITY_TYPES) else None for a in args],
-                {
-                    k: v.dimensionality if isinstance(v, _QUANTITY_TYPES) else None
-                    for k, v in kwargs.items()
-                },
-            )
-            inferred_info, inferred_reg = infer_return_units(func, args, kwargs, _return_units)
-            if inferred_info is not _SENTINEL:
-                _return_units[key] = inferred_info
-                if inferred_info is not None and inferred_reg is None:
-                    raise RuntimeError(
-                        f"'{func.__qualname__}': could not determine a UnitRegistry from "
-                        "arguments or module globals; pass Quantity arguments or define "
-                        "ureg = UnitRegistry() at module level."
-                    )
-                _return_registry[key] = inferred_reg
-                # Fall through to fast path below.
-            else:
-                # Inference failed: disable JIT for this function permanently.
-                _jit_disabled.add(key)
-                _log.warning(
-                    "'%s': unit inference failed; running as plain Pint on every call "
-                    "(no JIT speedup). Enable debug logging for details.",
-                    func.__qualname__,
-                )
-                return func(*args, **kwargs)
-
-        # Subsequent calls (and first call when inference succeeded): check
-        # dimensions, convert, run fast version, wrap result.
-        # Dimension check: skipped when inference failed to record arg dims (no _arg_dims entry).
-        if key in _arg_dims:
-            pos_dims, kw_dims = _arg_dims[key]
-            for i, (arg, dim) in enumerate(zip(args, pos_dims)):
-                if (
-                    dim is not None
-                    and isinstance(arg, _QUANTITY_TYPES)
-                    and arg.dimensionality != dim
-                ):  # noqa: E501
-                    msg = (
-                        f"{func.__qualname__}: argument {i} has dimensions "
-                        f"{dict(arg.dimensionality)}, expected {dict(dim)}"
-                    )
-                    _log.warning("dimension mismatch: %s", msg)
-                    raise TypeError(msg)
-            for kw_key, dim in kw_dims.items():
-                arg: Any = kwargs.get(kw_key)
-                if (
-                    dim is not None
-                    and isinstance(arg, _QUANTITY_TYPES)
-                    and arg.dimensionality != dim
-                ):
-                    msg = (
-                        f"{func.__qualname__}: argument '{kw_key}' has dimensions "
-                        f"{dict(arg.dimensionality)}, expected {dict(dim)}"
-                    )
-                    _log.warning("dimension mismatch: %s", msg)
-                    raise TypeError(msg)
-        stripped: list[tuple[Any, str, Any, Any]] = []
-        fast_args = tuple(_prepare_arg(a, stripped) for a in args)
-        fast_kwargs = {k: _prepare_arg(v, stripped) for k, v in kwargs.items()}
-        _fast_zone.active = True
-        try:
-            raw = fast_func(*fast_args, **fast_kwargs)
-        finally:
-            _fast_zone.active = False
-            _restore_inplace(stripped)
-        return _wrap(raw, _return_units[key], _return_registry[key])
+        return _wrap(raw, plan.units, plan.registry)
 
     wrapper.__name__ = func.__name__
     wrapper.__qualname__ = func.__qualname__

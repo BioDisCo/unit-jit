@@ -22,6 +22,7 @@ import functools
 from abc import ABC, abstractmethod
 from typing import cast
 
+from _jit_state import expect_execution
 from pint import Quantity, UnitRegistry
 
 import unit_jit as _uj
@@ -143,10 +144,8 @@ def test_plain_override_dimension():
 
 def test_jit_override_jit_active():
     sys = _make_sys(_ConcreteJit)
-    sys.total_rate(1.0 * ureg.mol / ureg.L)
-    key = f"{sys.total_rate.__module__}::{sys.total_rate.__qualname__}"
-    assert key in _uj._return_units
-    assert key not in _uj._jit_disabled
+    with expect_execution(sys.total_rate):
+        sys.total_rate(1.0 * ureg.mol / ureg.L)
 
 
 # ---------------------------------------------------------------------------
@@ -182,10 +181,12 @@ class _AutoCompileConcrete(_AutoCompileBase):
 
 def test_auto_compile_jit_active_before_first_call():
     """JIT pre-warmed by __init_subclass__: no call needed."""
-    sys = _AutoCompileConcrete(factor=2.0 * ureg.s)
+    with expect_execution(_AutoCompileConcrete.scale):
+        sys = _AutoCompileConcrete(factor=2.0 * ureg.s)
     key = f"{sys.scale.__module__}::{sys.scale.__qualname__}"
-    assert key in _uj._return_units, "scale() should be pre-compiled by __init_subclass__"
-    assert key not in _uj._jit_disabled
+    assert isinstance(_uj._states.get(key), _uj._Plan), (
+        "scale() should be pre-compiled by __init_subclass__"
+    )
 
 
 def test_auto_compile_result_correct():

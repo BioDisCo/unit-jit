@@ -5,9 +5,12 @@ Mutations inside the JIT loop were lost — the original object retained its
 pre-call Pint state.  Each test below verifies that:
   1. The computation ran correctly (result matches plain-Pint baseline).
   2. The original object's Pint attrs reflect the post-call state.
+  3. Traces prove stripped execution, except the explicitly unsupported plain
+     helper containing a unit literal, whose fallback is checked instead.
 """
 
 import numpy as np
+from _jit_state import expect_execution
 from pint import Quantity, UnitRegistry
 
 from unit_jit import unit_jit
@@ -39,7 +42,8 @@ def _accumulate(counter: _Counter, dx: Quantity, n: int) -> None:
 def test_scalar_mutation_propagates() -> None:
     c = _Counter()
     dx = 0.5 * ureg.m
-    _accumulate(c, dx, 10)
+    with expect_execution(_accumulate):
+        _accumulate(c, dx, 10)
     assert isinstance(c.value, Quantity)
     assert abs(c.value.to("m").magnitude - 5.0) < 1e-12
 
@@ -48,7 +52,8 @@ def test_scalar_mutation_matches_pint_baseline() -> None:
     c_jit = _Counter()
     c_ref = _Counter()
     dx = 0.3 * ureg.m
-    _accumulate(c_jit, dx, 7)
+    with expect_execution(_accumulate):
+        _accumulate(c_jit, dx, 7)
     for _ in range(7):
         c_ref.step(dx)
     assert abs(c_jit.value.to("m").magnitude - c_ref.value.to("m").magnitude) < 1e-12
@@ -82,7 +87,8 @@ def test_array_mutation_propagates() -> None:
     state = _EulerState(4)
     v = np.array([1.0, 2.0, 3.0, 4.0]) * ureg("m/s")
     dt = 0.1 * ureg.s
-    _euler_run(state, v, dt, 5)
+    with expect_execution(_euler_run):
+        _euler_run(state, v, dt, 5)
     assert isinstance(state.x, Quantity)
     assert isinstance(state.t, Quantity)
     expected_x = np.array([0.5, 1.0, 1.5, 2.0])
@@ -96,7 +102,8 @@ def test_array_mutation_matches_pint_baseline() -> None:
     v = np.array([1.0, -1.0, 0.5]) * ureg("m/s")
     dt = 0.05 * ureg.s
     n = 20
-    _euler_run(state_jit, v, dt, n)
+    with expect_execution(_euler_run):
+        _euler_run(state_jit, v, dt, n)
     for _ in range(n):
         state_ref.advance(v, dt)
     np.testing.assert_allclose(
@@ -138,7 +145,9 @@ def _nested_run(obj: _Outer, dx: Quantity, n: int) -> None:
 
 def test_nested_mutation_propagates() -> None:
     obj = _Outer()
-    _nested_run(obj, 2.0 * ureg.m, 6)
+    # The plain step helper contains a unit literal that would require rewriting.
+    with expect_execution(_nested_run, "fallback"):
+        _nested_run(obj, 2.0 * ureg.m, 6)
     assert abs(obj.total.to("m").magnitude - 12.0) < 1e-12
     assert abs(obj.inner.count.to("dimensionless").magnitude - 6.0) < 1e-12
 
@@ -167,7 +176,8 @@ def _cyclic_run(obj: _Cyclic, dt: Quantity, n: int) -> None:
 
 def test_cyclic_mutation_propagates() -> None:
     obj = _Cyclic()
-    _cyclic_run(obj, 0.1 * ureg.m, 5)
+    with expect_execution(_cyclic_run):
+        _cyclic_run(obj, 0.1 * ureg.m, 5)
     assert abs(obj.alpha.to("m").magnitude - 1.5) < 1e-12
     assert obj.self_ref is obj
 
@@ -181,6 +191,7 @@ def test_units_preserved_after_restore() -> None:
     state = _EulerState(2)
     v = np.array([3.0, 4.0]) * ureg("m/s")
     dt = 1.0 * ureg.s
-    _euler_run(state, v, dt, 1)
+    with expect_execution(_euler_run):
+        _euler_run(state, v, dt, 1)
     assert state.x.dimensionality == ureg.m.dimensionality
     assert state.t.dimensionality == ureg.s.dimensionality

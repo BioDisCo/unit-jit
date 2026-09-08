@@ -21,7 +21,7 @@ def test_lambda_return_unit_inferred_from_defaults():
     t_ramp = 30 * ureg.us
     cb = lambda step, s=speed, t=t_ramp: s * (1 - math.exp(-((step / t) ** 2)))  # noqa: E731
 
-    inferred, reg = infer_return_units(cb, (1 * ureg.s,), {}, {})
+    inferred, reg = infer_return_units(cb, (1 * ureg.s,), {})
     assert reg is not None
     assert inferred.dimensionality == (ureg.m / ureg.s).dimensionality
 
@@ -33,14 +33,14 @@ def test_lambda_transcendental_wrong_unit_raises():
     cb = lambda step, s=speed, t=t_bad: s * (1 - math.exp(-((step / t) ** 2)))  # noqa: E731
 
     with pytest.raises(TypeError, match="dimensionless argument"):
-        infer_return_units(cb, (1 * ureg.s,), {}, {})
+        infer_return_units(cb, (1 * ureg.s,), {})
 
 
 def test_default_binding_for_regular_function():
     def f(x, scale=2 * ureg.s):
         return x / scale
 
-    inferred, _ = infer_return_units(f, (1 * ureg.m,), {}, {})
+    inferred, _ = infer_return_units(f, (1 * ureg.m,), {})
     assert inferred.dimensionality == (ureg.m / ureg.s).dimensionality
 
 
@@ -56,7 +56,7 @@ def test_stored_lambda_positional_args_correct_units():
         fn = lambda x, y: x + y  # noqa: E731
         return fn(a, b)
 
-    inferred, _ = infer_return_units(f, (1 * ureg.m, 1 * ureg.m), {}, {})
+    inferred, _ = infer_return_units(f, (1 * ureg.m, 1 * ureg.m), {})
     assert inferred.dimensionality == ureg.m.dimensionality
 
 
@@ -67,7 +67,7 @@ def test_stored_lambda_positional_args_mismatched_units_raises():
         return fn(a, b)
 
     with pytest.raises(TypeError):
-        infer_return_units(f, (1 * ureg.m / ureg.s, 1 * ureg.m), {}, {})
+        infer_return_units(f, (1 * ureg.m / ureg.s, 1 * ureg.m), {})
 
 
 def test_stored_lambda_outer_scope_default():
@@ -76,7 +76,7 @@ def test_stored_lambda_outer_scope_default():
         fn = lambda a, b=y: a + b  # noqa: E731
         return fn(x)
 
-    inferred, _ = infer_return_units(f, (1 * ureg.m, 1 * ureg.m), {}, {})
+    inferred, _ = infer_return_units(f, (1 * ureg.m, 1 * ureg.m), {})
     assert inferred.dimensionality == ureg.m.dimensionality
 
 
@@ -87,7 +87,7 @@ def test_stored_lambda_outer_scope_default_wrong_unit_raises():
         return fn(x)
 
     with pytest.raises(TypeError):
-        infer_return_units(f, (1 * ureg.m / ureg.s, 1 * ureg.m), {}, {})
+        infer_return_units(f, (1 * ureg.m / ureg.s, 1 * ureg.m), {})
 
 
 def test_stored_lambda_transcendental_dimensional_arg_raises():
@@ -97,5 +97,5 @@ def test_stored_lambda_transcendental_dimensional_arg_raises():
         return fn(t)
 
     with pytest.raises(TypeError, match="dimensionless argument"):
-        infer_return_units(f, (1 * ureg.s,), {}, {})
+        infer_return_units(f, (1 * ureg.s,), {})
 

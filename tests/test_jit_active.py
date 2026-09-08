@@ -1,17 +1,13 @@
-"""Verify that JIT speedup conditions are met after first call.
-
-These tests check the internal state to confirm that:
-- unit inference succeeded (return units cached, JIT enabled), or
-- inference correctly failed and the function is marked as JIT-disabled.
-"""
+"""Verify actual fast/fallback execution and the separate JIT-state APIs."""
 
 import pytest
+from _jit_state import expect_execution
 from _jit_state import jit_active as _jit_active
 from _jit_state import jit_disabled as _jit_disabled
 from pint import Quantity, UnitRegistry
 
 import unit_jit as _uj
-from unit_jit import get_rewritten_source, unit_jit
+from unit_jit import get_rewritten_source, trace_execution, unit_jit
 
 ureg = UnitRegistry()
 
@@ -25,8 +21,8 @@ def _scalar(d: Quantity, t: Quantity) -> Quantity:
 
 
 def test_scalar_jit_active():
-    _scalar(10 * ureg.m, 2 * ureg.s)
-    assert _jit_active(_scalar)
+    with expect_execution(_scalar):
+        _scalar(10 * ureg.m, 2 * ureg.s)
 
 
 def test_scalar_module_compiled():
@@ -50,8 +46,8 @@ def _dimensionless(x: Quantity) -> float:
 
 
 def test_dimensionless_jit_active():
-    _dimensionless(3 * ureg.m)
-    assert _jit_active(_dimensionless)
+    with expect_execution(_dimensionless):
+        _dimensionless(3 * ureg.m)
 
 
 @unit_jit
@@ -92,29 +88,33 @@ def _plain_inverse_of_to_inverse_minutes_magnitude(rate: Quantity) -> float:
 
 def test_to_minutes_magnitude_matches_plain_pint():
     value = 120 * ureg.s
-    assert _to_minutes_magnitude(value) == pytest.approx(_plain_to_minutes_magnitude(value))
+    with expect_execution(_to_minutes_magnitude):
+        assert _to_minutes_magnitude(value) == pytest.approx(_plain_to_minutes_magnitude(value))
 
 
 def test_to_dimensionless_magnitude_matches_plain_pint():
     x = 6 * ureg.m
     y = 3 * ureg.m
-    assert _to_dimensionless_magnitude(x, y) == pytest.approx(
-        _plain_to_dimensionless_magnitude(x, y)
-    )
+    with expect_execution(_to_dimensionless_magnitude):
+        assert _to_dimensionless_magnitude(x, y) == pytest.approx(
+            _plain_to_dimensionless_magnitude(x, y)
+        )
 
 
 def test_to_inverse_minutes_magnitude_matches_plain_pint():
     rate = 120 / ureg.s
-    assert _to_inverse_minutes_magnitude(rate) == pytest.approx(
-        _plain_to_inverse_minutes_magnitude(rate)
-    )
+    with expect_execution(_to_inverse_minutes_magnitude):
+        assert _to_inverse_minutes_magnitude(rate) == pytest.approx(
+            _plain_to_inverse_minutes_magnitude(rate)
+        )
 
 
 def test_inverse_of_to_inverse_minutes_magnitude_matches_plain_pint():
     rate = 120 / ureg.s
-    assert _inverse_of_to_inverse_minutes_magnitude(rate) == pytest.approx(
-        _plain_inverse_of_to_inverse_minutes_magnitude(rate)
-    )
+    with expect_execution(_inverse_of_to_inverse_minutes_magnitude):
+        assert _inverse_of_to_inverse_minutes_magnitude(rate) == pytest.approx(
+            _plain_inverse_of_to_inverse_minutes_magnitude(rate)
+        )
 
 
 # Class methods
@@ -128,17 +128,24 @@ class _JitActiveModel:
 
 def test_class_method_jit_active():
     m = _JitActiveModel()
-    m.rate(1 * ureg.m)
-    assert _jit_active(m.rate)
+    with expect_execution(m.rate):
+        m.rate(1 * ureg.m)
 
 
 # input_args: inference triggered at decoration time
 
 
 def test_input_args_jit_active_before_explicit_call():
-    @unit_jit(input_args=(ureg.m, ureg.s))
-    def _input_args_fn(d: Quantity, t: Quantity) -> Quantity:
-        return d / t
+    with trace_execution() as trace:
+
+        @unit_jit(input_args=(ureg.m, ureg.s))
+        def _input_args_fn(d: Quantity, t: Quantity) -> Quantity:
+            return d / t
+
+    assert len(trace.calls) == 1
+    assert trace.calls[0].path == "fast"
+    assert trace.calls[0].arguments == {"d": 1, "t": 1}
+    assert trace.calls[0].result == 1
 
     # No explicit call: inference ran during decoration via input_args.
     assert _jit_active(_input_args_fn)
@@ -211,8 +218,8 @@ def test_init_subclass_result_correct():
 def test_init_subclass_jit_active_after_first_call():
     """After the first call, __init_subclass__-decorated reaction_rates is JIT-compiled."""
     model = _UserModel(0.5 / ureg.s, 0.1 * ureg.mol / ureg.L / ureg.s)
-    model.reaction_rates([10.0 * ureg.mol / ureg.L])
-    assert _jit_active(model.reaction_rates)
+    with expect_execution(model.reaction_rates):
+        model.reaction_rates([10.0 * ureg.mol / ureg.L])
 
 
 def test_init_subclass_fast_path_matches_pint():
@@ -221,8 +228,10 @@ def test_init_subclass_fast_path_matches_pint():
     gamma = 0.1 * ureg.mol / ureg.L / ureg.s
     state = [10.0 * ureg.mol / ureg.L]
     model = _UserModel(delta, gamma)
-    model.reaction_rates(state)  # warm-up
-    result = model.reaction_rates(state)
+    with expect_execution(model.reaction_rates):
+        model.reaction_rates(state)  # warm-up
+    with expect_execution(model.reaction_rates):
+        result = model.reaction_rates(state)
     assert (
         abs(result[0].to_base_units().magnitude - (delta * state[0]).to_base_units().magnitude)
         < 1e-12
@@ -257,7 +266,8 @@ def test_jit_disabled_on_inference_failure(caplog):
         globs,
     )
     f = globs["_no_src"]
-    with caplog.at_level(logging.WARNING, logger="unit_jit"):
-        f(1 * ureg.m)
+    with expect_execution(f, "fallback"):
+        with caplog.at_level(logging.WARNING, logger="unit_jit"):
+            f(1 * ureg.m)
     assert _jit_disabled(f)
     assert any("unit inference failed" in r.message for r in caplog.records)

@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from _jit_state import expect_execution
 from pint import Quantity, UnitRegistry
 
 numba = pytest.importorskip("numba")
@@ -25,14 +26,18 @@ def simulate_nb(t: Quantity) -> Quantity:
 
 
 def test_numba_returns_quantity():
-    simulate_nb(5 * ureg.min)  # warm-up
-    result = simulate_nb(10 * ureg.min)
+    with expect_execution(simulate_nb):
+        simulate_nb(5 * ureg.min)  # warm-up
+    with expect_execution(simulate_nb):
+        result = simulate_nb(10 * ureg.min)
     assert isinstance(result, Quantity)
 
 
 def test_numba_shape_and_finite():
-    simulate_nb(5 * ureg.min)  # warm-up
-    result = simulate_nb(10 * ureg.min)
+    with expect_execution(simulate_nb):
+        simulate_nb(5 * ureg.min)  # warm-up
+    with expect_execution(simulate_nb):
+        result = simulate_nb(10 * ureg.min)
     assert result.magnitude.shape == (600,)
     assert np.all(np.isfinite(result.magnitude))
 
@@ -52,8 +57,12 @@ def test_numba_matches_plain_unitjit():
             out[i] = mrna.to_base_units().magnitude
         return out * ureg.mol / ureg.m**3
 
-    simulate_plain(5 * ureg.min)
-    simulate_nb(5 * ureg.min)
-    out_plain = simulate_plain(10 * ureg.min)
-    out_nb = simulate_nb(10 * ureg.min)
+    with expect_execution(simulate_plain):
+        simulate_plain(5 * ureg.min)
+    with expect_execution(simulate_nb):
+        simulate_nb(5 * ureg.min)
+    with expect_execution(simulate_plain):
+        out_plain = simulate_plain(10 * ureg.min)
+    with expect_execution(simulate_nb):
+        out_nb = simulate_nb(10 * ureg.min)
     np.testing.assert_allclose(out_plain.magnitude, out_nb.magnitude)

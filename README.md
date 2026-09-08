@@ -18,7 +18,27 @@ velocity(10 * ureg.cm, 2 * ureg.s)  # fast and fine: same dimension, different u
 velocity(10 * ureg.m, 2 * ureg.m)   # TypeError: wrong dimension for arg 1
 ```
 
-On the first call, `unit-jit` abstract-interprets the function body with the input units, checks dimensional correctness across all branches, infers return units, and caches a CST-rewritten version that operates on raw floats. All subsequent calls convert arguments to SI floats at the boundary, run the rewritten pure-float version, and wrap the result back into a `Quantity` with the cached units.
+On the first call, `unit-jit` abstract-interprets the function body with the input units and checks whether its operations and callees can safely run on base-unit magnitudes. When this succeeds, it caches a rewritten function and its input/output unit schemas. Subsequent compatible calls convert arguments at the boundary, execute the float computation, and wrap the result. Unsupported computations run as original Pint code.
+
+## Unit safety and fallback
+
+Boundary checks bind positional arguments, keywords and defaults to the same parameter names. They check quantity presence, dimensions and registry identity, including quantities inside supported containers and object attributes. Changing values or compatible unit scales is allowed; changing a compiled argument's dimensions raises `TypeError` before conversion.
+
+When units depend on runtime values or unsupported control flow, `unit-jit` uses Pint fallback. This includes dynamic quantity powers, loops whose units change between iterations, branch-dependent return units, and assignments that change an object's attribute units. Local heterogeneous lists retain each element's units. Input-container mutations use fallback to preserve their effects on the original container.
+
+Bare `x.magnitude` also uses fallback: for `2 * ureg.cm`, its value is `2`, not `0.02`. Use `x.to_base_units().magnitude` when you want SI magnitudes and acceleration. Supported multiplicative `x.to(unit).magnitude` conversions remain accelerated after compatibility checking. Offset/logarithmic quantities and unverified numeric signatures use Pint.
+
+Fallback is decided before fast execution starts; a failed fast call is never retried. Mutable object fields are restored even when argument preparation or execution raises. In-place stripping still requires exclusive access to those objects during the call; it does not isolate them from concurrent readers or writers. Registry definitions must remain stable after compilation.
+
+Inference and rewriting share lexical scope information: parameters, assignments and comprehension targets take precedence over global names. Locally supplied callables use fallback unless their implementation is explicitly inferred. Known library calls bind their complete argument list to a declared contract. Data operands must have compatible unit semantics; shape/control arguments must be plain. Explicit scale-sensitive options (such as `initial`, `prepend`, `append` and `dtype`), output buffers and callbacks use fallback with quantities. Quantity methods additionally check the original backend's signature.
+
+Quantity floor division (`//` and `//=`) uses fallback because its unit requirements differ from ordinary division. Identity comparisons (`is` and `is not`) also use fallback so they observe the original objects. Every quantity fast path verifies backend arithmetic, coercion, indexing and NumPy dispatch protocols and guards them on cached calls. Methods additionally require availability on both the original backend and the stripped representation. Class/instance overrides and custom numeric, array or sequence protocols use original dispatch; supported standard operations remain accelerated. A catalogue-wide test matrix checks results, errors and actual fast/fallback entry for both Pint and pintrs.
+
+Before enabling a fast path, an independent syntax-tree audit checks that inference accounted for every expression in the function body. Unhandled expressions force fallback before argument conversion. Index expressions and slice bounds go through ordinary unit inference. This guards against missed traversal; supported unit rules still need semantic regression tests.
+
+Quantity-array writes and potentially mutating augmented assignments use fallback to preserve caller-visible storage, views and aliases. Cached schemas distinguish scalar and array quantities. Empty-container transitions and changed instance methods also use per-call fallback. Numba runs with bounds checking enabled.
+
+See [the implementation notes](docs/unit-safety-plan.md) for the inference and regression-test details.
 
 ## Benchmark
 
@@ -85,15 +105,18 @@ The speedup scales with loop length: the longer the loop, the more Pint overhead
 ## How it works
 
 1. **Unit inference**: on the first call, all `@unit_jit` functions in the module are rewritten together. The function body is abstract-interpreted with the input units: dimensional errors (e.g. adding meters to seconds) are caught across all branches, and return units are inferred. If source is unavailable, the function falls back to running as plain Pint on every call.
-2. **Eager snapshot**: `Quantity` attributes on objects (e.g. `self.params.alpha`) are pre-converted to SI floats once at boundary entry. Attribute access inside the loop is then a plain dict lookup.
-3. **Fast zone**: a thread-local flag marks the outermost `@unit_jit` frame. Inner `@unit_jit` calls skip boundary conversion entirely.
+2. **Object preparation**: `Quantity` attributes on objects (e.g. `self.params.alpha`) are converted in place at boundary entry and recorded in a restoration journal. Attribute access inside the loop is then a plain dict lookup.
+3. **Fast zone**: a thread-local flag marks the outermost `@unit_jit` frame. Inner calls must belong to that entry point's verified compilation plan.
 4. **Return wrapping**: the SI unit of the return value is determined by abstract interpretation and cached. For `NamedTuple` returns, each field's unit is tracked independently and the result is reconstructed as the same `NamedTuple` type with all fields wrapped back as `Quantity` objects. The registry is captured from the first call's arguments, so results always belong to the same registry that produced them.
 5. **Lazy callee inference**: when a `@unit_jit` function calls a method that is not yet inferred, including plain (non-decorated) methods and abstract methods implemented in subclasses, the inferrer analyses the callee recursively at inference time to resolve its return unit. The result is not written to global state; it is used only to complete the caller's unit chain.
-6. **Dimension guard**: argument dimensions are cached from the first call; any later call with a different dimension raises `TypeError` immediately.
+6. **Dimension guard**: a recursive argument schema is cached for the fast path. Later dimensional changes raise `TypeError`; changes to the concrete method implementation use the original function instead of the cached plan.
 
 The right entry point is the **outermost function that owns the hot loop**, not the leaf functions it calls.
 
 ## Installation
+
+Requires Python 3.13+, Pint 0.25.3+, NumPy 2.5.3+, and LibCST 1.9.0+.
+The optional Numba backend requires Numba 0.67.0+.
 
 ```bash
 uv add unit-jit
@@ -364,7 +387,7 @@ All `ureg` unit references are replaced by their SI float values (`ureg.nmol / u
 
 ### Checking that a function is actually JIT-compiled
 
-When unit inference fails, `unit_jit` logs a warning and silently falls back to plain Pint on every call: results stay correct, but the speedup is lost. Use `is_jit_active` and `is_jit_disabled` to assert that hot paths are genuinely accelerated.
+When unit inference fails, `unit_jit` logs a warning and silently falls back to plain Pint on every call: results stay correct, but the speedup is lost. Use `is_jit_active` and `is_jit_disabled` to inspect cached state, and `trace_execution()` to verify that hot paths actually execute with stripped arguments.
 
 ```python
 from unit_jit import unit_jit, is_jit_active, is_jit_disabled
@@ -374,11 +397,51 @@ def rate(d: Quantity, t: Quantity) -> Quantity:
     return d / t
 
 rate(10 * ureg.m, 2 * ureg.s)   # first call triggers inference and compilation
-assert is_jit_active(rate)      # True: running on the fast path
+assert is_jit_active(rate)      # True: a fast specialization is cached
 assert not is_jit_disabled(rate)
 ```
 
-Both predicates read runtime state only and never trigger compilation. A function acquires this state on its first call (or at decoration time when `input_args` is given), so both return `False` for a `@unit_jit` function that has not yet been called. If inference fails, `is_jit_active` returns `False` and `is_jit_disabled` returns `True`.
+Both predicates read runtime state only and never trigger compilation. A function acquires this state on its first call (or at decoration time when `input_args` is given), so both return `False` for a `@unit_jit` function that has not yet been called. If inference fails, `is_jit_active` returns `False` and `is_jit_disabled` returns `True`. An active cached plan can still use per-call fallback when an object implementation or referenced dependency changes.
+
+### Observe an actual call
+
+Use `trace_execution()` to check which path a particular invocation used:
+
+```python
+from unit_jit import trace_execution, unit_jit
+
+@unit_jit
+def speed(distance, time):
+    return distance / time
+
+with trace_execution() as trace:
+    result = speed(150 * ureg.cm, 2 * ureg.s)
+
+call = trace.calls[0]
+assert call.path == "fast"             # or "fallback"
+assert call.arguments == {"distance": 1.5, "time": 2}
+assert call.result == 0.75             # before quantity wrapping
+assert call.finished and call.exception is None
+```
+
+Each `ExecutionCall` records the undecorated `function`, `path`, bound
+`arguments`, body `result`, `exception`, and `finished` state. Records appear
+at body entry and are completed on return or raise. Nested decorated calls are
+included in entry order. Exceptions are re-raised unchanged. Failures before body
+entry (such as a dimension guard or argument-conversion failure) produce no call.
+
+Arguments are captured after preparation; fast results are captured before
+restoration and unit wrapping. Fallback quantities become `QuantitySnapshot`
+objects with their original `magnitude` and `units`. Numeric arrays are copied,
+containers are captured recursively (tuples become lists), and objects become
+dictionaries of instance attributes. Other opaque values remain references.
+These snapshots let tests distinguish stripped execution from fallback even
+after mutable fields have been restored.
+
+Nested trace scopes each receive calls within their scope; tracing is local to
+the execution context, with independent contexts in new threads. Tracing is
+opt-in and copies data, so leave it off for timing benchmarks. With tracing off,
+no snapshots or records are created.
 
 ## Numba integration
 
